@@ -1,0 +1,147 @@
+#!/usr/bin/env perl
+# clean-context - strips nvim chrome from raw tmux captured pane content
+#
+# Removes ANSI escapes, nvim split dividers, line numbers, status bars,
+# virtual text (e.g. git blame), and empty buffer markers (~).
+# Outputs only file content from the pane the cursor was in.
+#
+# Expects input captured with: tmux capture-pane -peCN
+#
+# Usage: clean-context [--cursor-col N] [file]  (default: stdin)
+#   --cursor-col N  tmux cursor_x position, used to select active vim pane
+
+use strict;
+use warnings;
+
+sub parse_segments {
+    my ($line) = @_;
+    my @segs;
+    my $bg = "default";
+    while ($line =~ /(\e\[[0-9;?]*[a-zA-Z])|([^\e]+)/g) {
+        if (defined $1) {
+            my $code = $1;
+            if    ($code =~ /\[0m/)                      { $bg = "default" }
+            elsif ($code =~ /\[49m/)                     { $bg = "default" }
+            elsif ($code =~ /\[48;2;(\d+);(\d+);(\d+)/) { $bg = "$1,$2,$3" }
+        } else {
+            push @segs, [$bg, $2];
+        }
+    }
+    return @segs;
+}
+
+# read all lines, converting -C encoded escapes to real ESC bytes
+my $cursor_col = -1;
+my @files;
+while (@ARGV) {
+    my $arg = shift @ARGV;
+    if ($arg eq "--cursor-col") { $cursor_col = shift @ARGV }
+    else { push @files, $arg }
+}
+@ARGV = @files;
+
+my @raw;
+while (<>) {
+    chomp;
+    s/\\033/\e/g;
+    push @raw, $_;
+}
+
+# parse lines and detect whether a vim split divider is present
+my @parsed;
+my $any_div = 0;
+for my $line (@raw) {
+    my @segs = parse_segments($line);
+    my $has_div = 0;
+    my $div_col = 0;
+    my $col = 0;
+    for my $s (@segs) {
+        if ($s->[1] =~ /^(.*?)│/) {
+            $has_div = 1;
+            $div_col = $col + length($1);
+            last;
+        }
+        $col += length($s->[1]);
+    }
+    $any_div = 1 if $has_div;
+    push @parsed, { segs => \@segs, has_div => $has_div, div_col => $div_col };
+}
+
+for my $p (@parsed) {
+    my @segs = @{$p->{segs}};
+
+    if ($any_div) {
+        # lines without divider are chrome (statusline, commandline)
+        next unless $p->{has_div};
+
+        # extract active pane's side of divider
+        my $want_right = ($cursor_col >= 0 && $cursor_col > $p->{div_col});
+
+        my @side;
+        if ($want_right) {
+            my $past_div = 0;
+            for my $s (@segs) {
+                if (!$past_div && $s->[1] =~ /│(.*)$/) {
+                    push @side, [$s->[0], $1] if length $1;
+                    $past_div = 1;
+                } elsif ($past_div) {
+                    push @side, $s;
+                }
+            }
+        } else {
+            for my $s (@segs) {
+                if ($s->[1] =~ /^(.*?)│/) {
+                    push @side, [$s->[0], $1] if length $1;
+                    last;
+                }
+                push @side, $s;
+            }
+        }
+
+        # skip chrome: lines with no default-bg segments (winbar, statusline)
+        next unless grep { $_->[0] eq "default" } @side;
+
+        # detect cursorline by line number segment having non-default bg
+        my $is_cursorline = 0;
+        for my $i (0 .. ($#side < 3 ? $#side : 3)) {
+            if ($side[$i][1] =~ /^\s*\d+\s*$/ && $side[$i][0] ne "default") {
+                $is_cursorline = 1;
+                last;
+            }
+        }
+
+        # cursorline: drop default-bg segments (virtual text, gutter icons)
+        if ($is_cursorline) {
+            @side = grep { $_->[0] ne "default" } @side;
+        }
+
+        @segs = @side;
+    } else {
+        # no split: skip lines where all non-whitespace segments have non-default bg (statusline)
+        my @visible = grep { $_->[1] !~ /^\s*$/ } @segs;
+        next if @visible && !grep { $_->[0] eq "default" } @visible;
+    }
+
+    # strip gutter: find line number segment among the first few
+    my $ln_idx = -1;
+    my $limit = $#segs < 3 ? $#segs : 3;
+    for my $i (0 .. $limit) {
+        if ($segs[$i][1] =~ /^\s*\d+\s*$/) {
+            $ln_idx = $i;
+            last;
+        }
+    }
+    @segs = @segs[($ln_idx + 1) .. $#segs] if $ln_idx >= 0;
+
+    my $text = join "", map { $_->[1] } @segs;
+
+    next if $text =~ /^\s*~\s*$/;
+
+    # unescape -C encoded backslashes
+    $text =~ s/\\\\/\\/g;
+
+    # strip trailing whitespace
+    $text =~ s/\s+$//;
+
+    print "$text\n";
+}
