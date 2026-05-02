@@ -42,6 +42,7 @@
             cp -r programs $out/share/ttmux/
             cp -r scripts $out/share/ttmux/
             chmod +x $out/share/ttmux/scripts/clean-context
+            chmod +x $out/share/ttmux/scripts/debug-run
 
             runHook postInstall
           '';

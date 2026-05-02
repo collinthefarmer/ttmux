@@ -1,0 +1,29 @@
+#!/bin/sh
+# debug-run - log a command's execution for ttmux debugging
+# Usage: debug-run LABEL COMMAND...
+LOG="/tmp/ttmux-debug.log"
+STDERR_TMP=$(mktemp)
+LABEL="$1"; shift
+CMD="$*"
+
+echo "--- $(date '+%H:%M:%S') [$LABEL] ---" >> "$LOG"
+echo "cmd: $CMD" >> "$LOG"
+
+OUT=$(eval "$CMD" 2>"$STDERR_TMP")
+RC=$?
+
+echo "exit: $RC" >> "$LOG"
+if [ -s "$STDERR_TMP" ]; then
+    echo "stderr:" >> "$LOG"
+    cat "$STDERR_TMP" >> "$LOG"
+fi
+if [ -n "$OUT" ]; then
+    echo "stdout:" >> "$LOG"
+    echo "$OUT" >> "$LOG"
+fi
+rm -f "$STDERR_TMP"
+echo "" >> "$LOG"
+
+# pass through stdout and preserve exit code
+printf '%s' "$OUT"
+exit $RC
