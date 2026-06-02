@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# stackexchange — search Stack Overflow via Stack Exchange API (no auth required)
+# outputs: title\turl\tsnippet
+set -euo pipefail
+
+query="${1:?usage: stackexchange <query>}"
+encoded=$(printf '%s' "$query" | jq -sRr @uri)
+
+curl -sL --max-time 10 --compressed \
+    "https://api.stackexchange.com/2.3/search/excerpts?order=desc&sort=relevance&q=${encoded}&site=stackoverflow&pagesize=10" \
+    2>/dev/null \
+| jq -r '
+  def decode: gsub("<[^>]+>"; "") | gsub("&quot;"; "\"") | gsub("&#39;"; "'\''") | gsub("&amp;"; "&") | gsub("&hellip;"; "…") | gsub("&lt;"; "<") | gsub("&gt;"; ">") | gsub("\t"; " ");
+  .items[]? | select(.question_id) | [
+    (.title | decode),
+    "https://stackoverflow.com/q/\(.question_id)",
+    (.excerpt // "" | decode | gsub("\n"; " ") | gsub("  +"; " ") | .[0:300])
+  ] | @tsv'

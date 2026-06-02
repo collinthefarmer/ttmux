@@ -1,34 +1,48 @@
 #!/usr/bin/env bash
 #
-# agent-popup — open the agent popup with key restriction
+# agent-popup — open a popup session with key restriction
 #
-# Ensures the agent session exists, applies popup key restrictions,
-# opens the popup, and restores key state on close.
+# Ensures the session exists, applies popup key restrictions,
+# opens the session in a popup, and restores key state on close.
 #
-# Reads from tmux session options:
-#   @agentSessionName    — the agent session name (e.g. agent@projects/foo)
-#   @commandAgentSession — the tmux new-session command for display-popup
-#   @cmdAgent            — the agent command (server option)
+# Reads from tmux session options set by the calling program:
+#   @<prefix>SessionName     — the session name
+#   @command<Prefix>Session  — the tmux new-session -A command
 #
 # Usage:
-#   agent-popup <ttmux-dir>
+#   agent-popup <ttmux-dir> <table> <opt-prefix> [popup-args...]
+#
+# Examples:
+#   agent-popup ~/ttmux agent agent -w 80 -h 75%
+#   agent-popup ~/ttmux search search -w 90% -h 80%
 
 set -euo pipefail
 
-dir="${1:?usage: agent-popup <ttmux-dir>}"
+dir="${1:?usage: agent-popup <dir> <table> <opt-prefix> [popup-args...]}"
+table="$2"
+opt_prefix="$3"
+shift 3
+
 popup_keys="$dir/scripts/popup-keys"
 
-session=$(tmux show-option -qv @agentSessionName)
-attach_cmd=$(tmux show-option -qv @commandAgentSession)
-agent_cmd=$(tmux show-option -sqv @cmdAgent)
+session=$(tmux show-option -qv "@${opt_prefix}SessionName")
+attach_cmd=$(tmux show-option -qv "@command${opt_prefix^}Session")
+# optional: initial command for session creation (server option)
+init_cmd=$(tmux show-option -sqv "@cmd${opt_prefix^}" 2>/dev/null) || init_cmd=""
 
-[[ -n "$session" ]] || { echo "agent-popup: @agentSessionName not set" >&2; exit 1; }
+[[ -n "$session" ]] || { echo "agent-popup: @${opt_prefix}SessionName not set" >&2; exit 1; }
+[[ -n "$attach_cmd" ]] || { echo "agent-popup: @command${opt_prefix^}Session not set" >&2; exit 1; }
 
-# ensure agent session exists
-tmux has-session -t "$session" 2>/dev/null \
-    || tmux new-session -d -s "$session" "$agent_cmd"
+# ensure session exists so popup-keys can target it
+if ! tmux has-session -t "$session" 2>/dev/null; then
+    if [[ -n "$init_cmd" ]]; then
+        tmux new-session -d -s "$session" "$init_cmd"
+    else
+        tmux new-session -d -s "$session"
+    fi
+fi
 
 # restrict keybinds, open popup, restore on close
-"$popup_keys" open agent "$session"
-tmux display-popup -b rounded -w 80 -h 75% -E "$attach_cmd"
+"$popup_keys" open "$table" "$session"
+tmux display-popup -b rounded "$@" -E "$attach_cmd"
 "$popup_keys" close "$session"

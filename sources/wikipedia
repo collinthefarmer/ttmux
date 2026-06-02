@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# wikipedia — search via MediaWiki API (no auth required)
+# outputs: title\turl\tsnippet
+set -euo pipefail
+
+query="${1:?usage: wikipedia <query>}"
+encoded=$(printf '%s' "$query" | jq -sRr @uri)
+
+curl -sL --max-time 10 \
+    "https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encoded}&format=json&utf8=1&srlimit=10" \
+    2>/dev/null \
+| jq -r '
+  def decode: gsub("<[^>]+>"; "") | gsub("&quot;"; "\"") | gsub("&#39;"; "'\''") | gsub("&amp;"; "&") | gsub("&hellip;"; "…") | gsub("&lt;"; "<") | gsub("&gt;"; ">") | gsub("\t"; " ");
+  .query.search[] | [
+    .title,
+    "https://en.wikipedia.org/wiki/\(.title | gsub(" "; "_"))",
+    (.snippet | decode | gsub("  +"; " "))
+  ] | @tsv'

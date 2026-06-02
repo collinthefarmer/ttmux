@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+#
+# telescope-open — open a URL in w3m as a new window in the current search session
+#
+# Expects to be run from within a search@ session (inside the popup).
+# Adds a new window with w3m and switches to it.
+#
+# Usage:
+#   telescope-open <url>
+
+set -euo pipefail
+
+url="${1:?usage: telescope-open <url>}"
+
+# derive a short window name from the URL
+win_name=$(printf '%s' "$url" \
+    | sed 's|^https\?://||; s|^www\.||; s|/$||' \
+    | cut -c1-60)
+
+tmux new-window -n "$win_name" "w3m '$url'"

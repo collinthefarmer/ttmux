@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# arxiv — search papers via arXiv Atom API (no auth required)
+# outputs: title\turl\tsnippet
+set -euo pipefail
+
+query="${1:?usage: arxiv <query>}"
+encoded=$(printf '%s' "$query" | jq -sRr @uri)
+
+curl -sL --max-time 10 \
+    "http://export.arxiv.org/api/query?search_query=all:${encoded}&max_results=10" \
+    2>/dev/null \
+| xmlstarlet sel -N a="http://www.w3.org/2005/Atom" \
+    -t -m '//a:entry' \
+    -v 'normalize-space(a:title)' -o $'\t' \
+    -v 'a:id' -o $'\t' \
+    -v 'normalize-space(substring(a:summary, 1, 200))' -n \
+    2>/dev/null \
+| sed 's/&amp;/\&/g; s/&lt;/</g; s/&gt;/>/g; s/&quot;/"/g' \
+|| true

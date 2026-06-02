@@ -2,29 +2,70 @@
 #
 # fzf-dispatch — list, select with fzf, dispatch on selection
 #
-# Reads tmux session options for the list command, fzf arguments,
-# and dispatch command. Pipes list into fzf, then runs dispatch
-# with {} replaced by the selection. Exits silently on cancel or
-# empty selection.
+# Reads tmux session options for the fzf arguments and dispatch command.
+# Pipes a list into fzf (or uses async reload), then runs dispatch with
+# the selection. Exits silently on cancel or empty selection.
 #
 # Usage:
-#   fzf-dispatch <list-opt> <fzf-opt> <dispatch-opt>
+#   fzf-dispatch <list-opt> <fzf-opt> <dispatch-opt> [options]
 #
-# Each argument is the name of a tmux session option (without @).
-# Example:
+# Each of the first three arguments is a tmux session option name (without @).
+#
+# Options:
+#   --reload <cmd>    Use async reload mode: fzf starts empty, runs <cmd>
+#                     on each keystroke. <cmd> receives the query via {q}.
+#   --field <n>       Extract field n (tab-delimited) from the selection
+#                     before substituting into dispatch. Default: whole line.
+#
+# In the dispatch command, {} is replaced with the selection (or extracted field).
+#
+# Examples:
 #   fzf-dispatch cmdSshList cmdSshFzf cmdSshLaunch
+#   fzf-dispatch "" cmdTelescopeFzf cmdTelescopeOpen --reload "telescope --resolve {q}" --field 3
 
 set -euo pipefail
 
-list_cmd=$(tmux show-option -qv "@$1")
-fzf_args=$(tmux show-option -qv "@$2")
-dispatch_cmd=$(tmux show-option -qv "@$3")
+list_opt="${1:-}"
+fzf_opt="${2:-}"
+dispatch_opt="${3:-}"
+shift 3 || true
 
-[[ -n "$list_cmd" ]] || { echo "fzf-dispatch: option @$1 not set" >&2; exit 1; }
-[[ -n "$dispatch_cmd" ]] || { echo "fzf-dispatch: option @$3 not set" >&2; exit 1; }
+reload_cmd=""
+field=""
 
-selection=$(eval "$list_cmd" | eval "fzf $fzf_args") || exit 0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --reload) reload_cmd="$2"; shift 2 ;;
+        --field) field="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+
+fzf_args=""
+[[ -n "$fzf_opt" ]] && fzf_args=$(tmux show-option -qv "@$fzf_opt")
+
+dispatch_cmd=""
+[[ -n "$dispatch_opt" ]] && dispatch_cmd=$(tmux show-option -qv "@$dispatch_opt")
+
+[[ -n "$dispatch_cmd" ]] || { echo "fzf-dispatch: dispatch option not set" >&2; exit 1; }
+
+if [[ -n "$reload_cmd" ]]; then
+    # async reload mode: fzf starts empty, reloads on keystroke
+    selection=$(
+        eval "fzf --disabled --bind 'change:reload:$reload_cmd || true' $fzf_args" < /dev/null
+    ) || exit 0
+else
+    list_cmd=$(tmux show-option -qv "@$list_opt")
+    [[ -n "$list_cmd" ]] || { echo "fzf-dispatch: option @$list_opt not set" >&2; exit 1; }
+    selection=$(eval "$list_cmd" | eval "fzf $fzf_args") || exit 0
+fi
+
 [[ -n "$selection" ]] || exit 0
+
+# extract a specific field if requested
+if [[ -n "$field" ]]; then
+    selection=$(printf '%s' "$selection" | cut -f"$field")
+fi
 
 dispatch_cmd="${dispatch_cmd//\{\}/$selection}"
 eval "$dispatch_cmd"

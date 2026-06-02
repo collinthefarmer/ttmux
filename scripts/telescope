@@ -2,144 +2,99 @@
 #
 # telescope — search across multiple sources, preview results, browse interactively
 #
-# Modes:
-#   telescope              Launch the fzf interface (default)
+# Sources are executable scripts in the sources directory. Each receives
+# a query as $1 and outputs tab-delimited results to stdout:
+#
+#   title\turl\tsnippet
+#
+# One result per line. Exit 0 on success, even if no results.
+# The script filename is used as the source name in the UI.
+#
+# Source directories (checked in order, first found wins):
+#   ~/.config/ttmux/telescope/sources/
+#   <ttmux-dir>/sources/
+#
+# Usage:
+#   telescope              Launch the fzf interface (via fzf-dispatch)
 #   telescope --resolve Q  Resolve query Q against all sources, output results
-#
-# Sources are configurable via ~/.config/ttmux/telescope.conf
-# (one per line, pipe-delimited):
-#
-#   name|type|target
-#
-# Types:
-#   surfraw  — target is a surfraw elvis name
-#   rss      — target is a base RSS URL (query appended as ?q= or &q=)
 
 set -euo pipefail
 
-# bootstrap: if surfraw is not on PATH, re-exec under nix shell with all deps
-if ! command -v surfraw >/dev/null 2>&1; then
+# bootstrap: if deps aren't on PATH, re-exec under nix shell
+if ! command -v jq >/dev/null 2>&1 || ! command -v fzf >/dev/null 2>&1; then
     exec nix --extra-experimental-features 'nix-command flakes' shell \
-        nixpkgs#surfraw nixpkgs#w3m nixpkgs#jq \
-        nixpkgs#xmlstarlet nixpkgs#curl nixpkgs#fzf \
+        nixpkgs#curl nixpkgs#jq nixpkgs#fzf \
+        nixpkgs#w3m nixpkgs#xmlstarlet nixpkgs#coreutils \
         --command bash "$0" "$@"
 fi
 
-# surfraw needs its config dir to find elvi
-if [[ -z "${XDG_CONFIG_DIRS:-}" ]]; then
-    surfraw_prefix=$(dirname "$(dirname "$(command -v surfraw)")")
-    export XDG_CONFIG_DIRS="$surfraw_prefix/etc/xdg"
-elif [[ "$XDG_CONFIG_DIRS" != *surfraw* ]]; then
-    surfraw_prefix=$(dirname "$(dirname "$(command -v surfraw)")")
-    export XDG_CONFIG_DIRS="$XDG_CONFIG_DIRS:$surfraw_prefix/etc/xdg"
-fi
-
-CONF="${XDG_CONFIG_HOME:-$HOME/.config}/ttmux/telescope.conf"
+SELF=$(realpath "$0")
+TTMUX_DIR=$(dirname "$SELF")/..
+USER_SOURCES="${XDG_CONFIG_HOME:-$HOME/.config}/ttmux/telescope/sources"
+DEFAULT_SOURCES="$TTMUX_DIR/sources"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/ttmux/telescope"
 mkdir -p "$CACHE_DIR"
 
-# --- sources ---------------------------------------------------------------
-# Each source has a static relevance weight (higher = shown first).
-# Weights are assigned by list position: first source = highest.
+# --- gather: run all sources for a query -----------------------------------
 
-DEFAULT_SOURCES=(
-    "duckduckgo|surfraw|duckduckgo"
-    "wikipedia|surfraw|wikipedia"
-    "github|surfraw|github"
-    "stack overflow|surfraw|stack"
-    "arxiv|surfraw|arxiv"
-    "scholar|surfraw|scholar"
-)
-
-load_sources() {
-    if [[ -f "$CONF" ]]; then
-        SOURCES=()
-        while IFS= read -r line; do
-            [[ -z "$line" || "$line" == \#* ]] && continue
-            SOURCES+=("$line")
-        done < "$CONF"
-    else
-        SOURCES=("${DEFAULT_SOURCES[@]}")
-    fi
-}
-
-# --- resolve: generate source results for a query -------------------------
-
-resolve() {
+gather() {
     local query="$1"
     [[ -z "$query" ]] && return 0
 
-    load_sources
+    local sources_dir="$DEFAULT_SOURCES"
+    [[ -d "$USER_SOURCES" ]] && sources_dir="$USER_SOURCES"
 
-    local total=${#SOURCES[@]}
-    local i=0
-    for src in "${SOURCES[@]}"; do
-        IFS='|' read -r name type target <<< "$src"
-        local url=""
-        case "$type" in
-            surfraw)
-                url=$(surfraw -print "$target" "$query" 2>/dev/null) || url=""
-                ;;
-            rss)
-                local encoded
-                encoded=$(printf '%s' "$query" | jq -sRr @uri)
-                if [[ "$target" == *"?"* ]]; then
-                    url="${target}&q=${encoded}"
-                else
-                    url="${target}?q=${encoded}"
-                fi
-                ;;
-        esac
-        if [[ -n "$url" ]]; then
-            # relevance: position-based weight (first source = highest score)
-            # TODO: replace with actual relevance scoring (response status, result count, etc.)
-            local score=$(( total - i ))
-            printf '%s\t%s\t%s\t%s\n' "$score" "$name" "$type" "$url"
-        fi
-        (( i++ )) || true
-    done | sort -t$'\t' -k1 -rn
+    [[ -d "$sources_dir" ]] || return 0
+
+    for src in "$sources_dir"/*; do
+        [[ -x "$src" ]] || continue
+        local name
+        name=$(basename "$src")
+
+        # run source, prepend source name to each result line
+        "$src" "$query" 2>/dev/null \
+            | while IFS= read -r line; do
+                [[ -n "$line" ]] && printf '%s\t%s\n' "$name" "$line"
+            done &
+    done
+    wait
 }
 
-# --- preview script (passed to fzf) ---------------------------------------
+# --- rank: score results by query relevance --------------------------------
 
-read -r -d '' PREVIEW_SCRIPT << 'PREVIEW_EOF' || true
-line="{}"
-type=$(printf '%s' "$line" | cut -f3)
-url=$(printf '%s' "$line" | cut -f4)
+rank() {
+    local query="$1"
+    awk -F'\t' -v query="$query" '
+    BEGIN {
+        q = tolower(query)
+        n = split(q, words, /[[:space:]]+/)
+    }
+    {
+        title = tolower($2)
+        snippet = tolower($4)
+        score = 0
 
-CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/ttmux/telescope"
-key=$(printf '%s' "$url" | cksum | cut -d' ' -f1)
-cache="$CACHE_DIR/preview.${key}"
+        # bonus for full query in title
+        if (index(title, q) > 0) score += 20
 
-if [[ -f "$cache" ]]; then
-    cat "$cache"
-    exit 0
-fi
+        # per-word matches
+        for (i = 1; i <= n; i++) {
+            if (index(title, words[i]) > 0) score += 10
+            if (index(snippet, words[i]) > 0) score += 3
+        }
 
-if [[ "$type" == "rss" ]]; then
-    result=$(curl -sL --max-time 10 "$url" 2>/dev/null)
-    if command -v xmlstarlet >/dev/null 2>&1; then
-        echo "$result" \
-            | xmlstarlet sel -t -m '//item' \
-                -v 'title' -n -v 'link' -n -n \
-                2>/dev/null \
-            | head -100 \
-            | tee "$cache"
-    else
-        echo "$result" \
-            | w3m -dump -T text/xml 2>/dev/null \
-            | head -100 \
-            | tee "$cache"
-    fi
-else
-    timeout 15 curl -sL --max-time 10 "$url" 2>/dev/null \
-        | w3m -dump -T text/html -cols "${FZF_PREVIEW_COLUMNS:-80}" 2>/dev/null \
-        | head -200 \
-        | tee "$cache"
-fi
-PREVIEW_EOF
+        printf "%d\t%s\n", score, $0
+    }' | sort -t$'\t' -k1 -rn | cut -f2-
+}
 
-# --- main: launch fzf or resolve ------------------------------------------
+# --- resolve: gather + rank ------------------------------------------------
+
+resolve() {
+    local query="$1"
+    gather "$query" | rank "$query"
+}
+
+# --- main ------------------------------------------------------------------
 
 if [[ "${1:-}" == "--resolve" ]]; then
     shift
@@ -147,24 +102,18 @@ if [[ "${1:-}" == "--resolve" ]]; then
     exit 0
 fi
 
-SELF=$(realpath "$0")
+# register search popup close key (T toggles telescope closed)
+POPUP_KEYS="$(dirname "$SELF")/popup-keys"
+"$POPUP_KEYS" bind search T detach-client
 
-SELECTED=$(
-    fzf \
-        --tmux 90%,80% \
-        --disabled \
-        --border \
-        --border-label=" telescope " \
-        --delimiter=$'\t' \
-        --with-nth=2 \
-        --preview="$PREVIEW_SCRIPT" \
-        --preview-window=right:70%:wrap \
-        --header="type to search, enter=browse" \
-        --bind "change:reload:$SELF --resolve {q} || true" \
-        < /dev/null
-) || exit 0
+# set up tmux options for fzf-dispatch
+PREVIEW_CMD="$(dirname "$SELF")/telescope-preview"
+tmux set-option @telescopeFzf \
+    "--border --border-label=\" telescope \" --delimiter=$'\t' --with-nth=1,2 --ellipsis=… --no-hscroll --preview=\"$PREVIEW_CMD {}\" --preview-window=right:60%:wrap --header=\"type to search, enter=open\""
+OPEN_CMD="$(dirname "$SELF")/telescope-open"
+tmux set-option @telescopeOpen "$OPEN_CMD '{}'"
 
-# --- output selected URL --------------------------------------------------
-
-URL=$(printf '%s' "$SELECTED" | cut -f4)
-[[ -n "$URL" ]] && echo "$URL"
+exec "$(dirname "$SELF")/fzf-dispatch" \
+    "" telescopeFzf telescopeOpen \
+    --reload "$SELF --resolve {q}" \
+    --field 3

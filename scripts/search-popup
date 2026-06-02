@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+#
+# search-popup — open the search popup with key restriction
+#
+# Ensures the search session exists (with telescope in window 0),
+# applies popup key restrictions, opens the popup, and restores
+# key state on close.
+#
+# Usage:
+#   search-popup <ttmux-dir>
+
+set -euo pipefail
+
+dir="${1:?usage: search-popup <ttmux-dir>}"
+popup_keys="$dir/scripts/popup-keys"
+telescope="$dir/scripts/telescope"
+
+session=$(tmux show-option -qv @searchSessionName)
+attach_cmd=$(tmux show-option -qv @commandSearchSession)
+
+[[ -n "$session" ]] || { echo "search-popup: @searchSessionName not set" >&2; exit 1; }
+
+# ensure search session exists with telescope in the first window
+if ! tmux has-session -t "$session" 2>/dev/null; then
+    tmux new-session -d -s "$session" -n "telescope" "$telescope"
+fi
+
+# restrict keybinds, open popup, restore on close
+"$popup_keys" open search "$session"
+tmux display-popup -b rounded -w 90% -h 80% -E "$attach_cmd"
+"$popup_keys" close "$session"

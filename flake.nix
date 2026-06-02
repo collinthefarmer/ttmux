@@ -27,6 +27,7 @@
               ./bindings.tmux.conf
               ./programs
               ./scripts
+              ./sources
             ];
           };
 
@@ -50,9 +51,11 @@
             cp tmux.conf init.tmux.conf options.tmux.conf bindings.tmux.conf $out/share/ttmux/
             cp -r programs $out/share/ttmux/
             cp -r scripts $out/share/ttmux/
+            cp -r sources $out/share/ttmux/
 
             # make all scripts executable
             chmod +x $out/share/ttmux/scripts/*
+            chmod +x $out/share/ttmux/sources/*
 
             # --- wrap scripts with their runtime dependencies ---
 
@@ -85,11 +88,30 @@
 
             wrapProgram $out/share/ttmux/scripts/telescope \
               --prefix PATH : ${pkgs.lib.makeBinPath [
-                pkgs.coreutils pkgs.gnused pkgs.gnugrep
-                pkgs.curl pkgs.w3m pkgs.jq
-                pkgs.xmlstarlet pkgs.surfraw pkgs.fzf
-              ]} \
-              --suffix XDG_CONFIG_DIRS : "${pkgs.surfraw}/etc/xdg"
+                pkgs.coreutils pkgs.gnugrep pkgs.fzf
+                pkgs.curl pkgs.w3m
+              ]}
+
+            wrapProgram $out/share/ttmux/scripts/search-popup \
+              --prefix PATH : ${coreTools}
+
+            wrapProgram $out/share/ttmux/scripts/telescope-open \
+              --prefix PATH : ${pkgs.lib.makeBinPath [
+                pkgs.coreutils pkgs.w3m
+              ]}
+
+            wrapProgram $out/share/ttmux/scripts/telescope-preview \
+              --prefix PATH : ${pkgs.lib.makeBinPath [
+                pkgs.coreutils pkgs.curl pkgs.w3m
+              ]}
+
+            # wrap source scripts with their API dependencies
+            for src in $out/share/ttmux/sources/*; do
+              wrapProgram "$src" \
+                --prefix PATH : ${pkgs.lib.makeBinPath [
+                  pkgs.coreutils pkgs.curl pkgs.jq pkgs.xmlstarlet
+                ]}
+            done
 
             runHook postInstall
           '';

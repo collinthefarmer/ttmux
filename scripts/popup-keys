@@ -20,16 +20,30 @@
 
 set -euo pipefail
 
+ensure_table() {
+    local table="$1"
+    local pt="${table}-prefix"
+    local prefix
+    prefix=$(tmux show-option -gqv prefix)
+
+    # route prefix key to <table>-prefix
+    tmux bind-key -T "$table" "$prefix" switch-client -T "$pt"
+
+    # standard window navigation (available in all popup tables)
+    tmux bind-key -T "$pt" n next-window
+    tmux bind-key -T "$pt" p previous-window
+    local i
+    for i in 0 1 2 3 4 5 6 7 8 9; do
+        tmux bind-key -T "$pt" "$i" select-window -t ":=$i"
+    done
+}
+
 bind() {
     local table="$1" key="$2"
     shift 2
     local cmd="$*"
 
-    local prefix
-    prefix=$(tmux show-option -gqv prefix)
-
-    # ensure the root-level table routes prefix to <table>-prefix
-    tmux bind-key -T "$table" "$prefix" switch-client -T "${table}-prefix"
+    ensure_table "$table"
 
     # register the keybind
     tmux bind-key -T "${table}-prefix" "$key" $cmd
