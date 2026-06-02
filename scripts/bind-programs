@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+#
+# bind-programs — scan program headers and emit tmux keybindings
+#
+# Programs declare their bindings via structured comments:
+#   # @bind <table> <key>                 — trigger binding
+#   # @bind-condition <format>            — only fire if format is truthy
+#   # @bind-action <tmux-command>         — raw command instead of source-file
+#   # @popup-table <name>                 — popup key table name
+#   # @popup-key <key> <command...>       — key available inside popup
+#
+# Programs without @bind are indirect (sourced by other programs) and skipped.
+# Uses tmux-escape for safe string transport through shell→tmux boundaries.
+#
+# Usage:
+#   bind-programs <ttmux-dir>
+
+set -euo pipefail
+
+dir="${1:?usage: bind-programs <ttmux-dir>}"
+popup_keys="$dir/scripts/popup-keys"
+escape="$dir/scripts/tmux-escape"
+
+for file in "$dir"/programs/*.tmux.conf; do
+    bind_table="" bind_key="" bind_condition="" bind_action=""
+    popup_table=""
+    declare -a popup_entries=()
+
+    # parse header comments (stop at first non-comment, non-blank line)
+    while IFS= read -r line; do
+        [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+        [[ "$line" =~ ^# ]] || break
+
+        if [[ "$line" =~ ^#\ @bind\ ([^ ]+)\ (.+)$ ]]; then
+            bind_table="${BASH_REMATCH[1]}"
+            bind_key="${BASH_REMATCH[2]}"
+        elif [[ "$line" =~ ^#\ @bind-condition\ (.+)$ ]]; then
+            bind_condition="${BASH_REMATCH[1]}"
+        elif [[ "$line" =~ ^#\ @bind-action\ (.+)$ ]]; then
+            bind_action="${BASH_REMATCH[1]}"
+        elif [[ "$line" =~ ^#\ @popup-table\ (.+)$ ]]; then
+            popup_table="${BASH_REMATCH[1]}"
+        elif [[ "$line" =~ ^#\ @popup-key\ ([^ ]+)\ (.+)$ ]]; then
+            popup_entries+=("${BASH_REMATCH[1]}|${BASH_REMATCH[2]}")
+        fi
+    done < "$file"
+
+    # skip programs with no @bind declaration
+    [[ -z "$bind_key" ]] && continue
+
+    # build the tmux command string — encode paths for safe shell transport
+    if [[ -n "$bind_action" ]]; then
+        # action is raw tmux syntax — use eval to preserve its quoting
+        if [[ "$bind_table" == "prefix" ]]; then
+            if [[ -n "$bind_condition" ]]; then
+                tmux bind-key "$bind_key" if-shell -F \
+                    "$bind_condition" \
+                    "$bind_action"
+            else
+                eval "tmux bind-key '$bind_key' $bind_action"
+            fi
+        else
+            eval "tmux bind-key -T '$bind_table' '$bind_key' $bind_action"
+        fi
+    else
+        # source-file — encode the path
+        file_enc=$("$escape" encode "$file")
+        if [[ "$bind_table" == "prefix" ]]; then
+            if [[ -n "$bind_condition" ]]; then
+                tmux bind-key "$bind_key" if-shell -F \
+                    "$bind_condition" \
+                    "source-file $file_enc"
+            else
+                eval "tmux bind-key '$bind_key' source-file $file_enc"
+            fi
+        else
+            eval "tmux bind-key -T '$bind_table' '$bind_key' source-file $file_enc"
+        fi
+    fi
+
+    # register popup key table entries
+    if [[ -n "$popup_table" ]]; then
+        for entry in "${popup_entries[@]}"; do
+            local_key="${entry%%|*}"
+            local_cmd="${entry#*|}"
+            "$popup_keys" bind "$popup_table" "$local_key" $local_cmd
+        done
+    fi
+done

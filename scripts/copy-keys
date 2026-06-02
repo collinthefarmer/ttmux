@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+#
+# copy-keys — copy bindings from one tmux key table to another
+#
+# Uses list-keys output as valid tmux syntax, swaps the table name,
+# and sources the result. No shell parsing of command bodies.
+#
+# Usage:
+#   copy-keys <from-table> <to-table> [exclude-key]
+
+set -euo pipefail
+
+from_table="${1:?usage: copy-keys <from-table> <to-table> [exclude-key]}"
+to_table="${2:?usage: copy-keys <from-table> <to-table> [exclude-key]}"
+exclude_key="${3:-}"
+
+tmpfile=$(mktemp)
+trap 'rm -f "$tmpfile"' EXIT
+
+tmux list-keys -T "$from_table" 2>/dev/null \
+    | sed "s/-T ${from_table}/-T ${to_table}/" \
+    | if [[ -n "$exclude_key" ]]; then
+        grep -v "^bind-key[[:space:]]*-T ${to_table} ${exclude_key}[[:space:]]"
+      else
+        cat
+      fi \
+    > "$tmpfile"
+
+tmux source-file "$tmpfile"

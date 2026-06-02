@@ -8,7 +8,7 @@
 #   colorscheme apply-current              Apply scheme for the current session (used by hooks)
 #   colorscheme save <session-name>        Write scheme to ~/.local/share/ttmux/schemes/<name>.conf
 #   colorscheme preview                    Cycle through all schemes on the current session
-#   colorscheme hook-init <ttmux-dir>      Install the client-session-changed hook
+#   colorscheme hook-init <ttmux-dir>      Install session lifecycle hooks
 #
 # Changes the terminal itself — the 16 ANSI colors, default foreground,
 # background, and cursor — via OSC escape sequences pushed through tmux
@@ -290,11 +290,37 @@ apply() {
 
     # stash scheme name for introspection / hook re-application
     tmux set-option $t @colorscheme "$scheme"
+
+    # write palette file for editors (e.g. nnvim colorgen)
+    local palette_dir="${XDG_DATA_HOME:-$HOME/.local/share}/terminal-colors"
+    mkdir -p "$palette_dir"
+    cat > "$palette_dir/palette" <<PALETTE
+FG=$FG
+BG=$BG
+C0=$C0
+C1=$C1
+C2=$C2
+C3=$C3
+C4=$C4
+C5=$C5
+C6=$C6
+C7=$C7
+C8=$C8
+C9=$C9
+C10=$C10
+C11=$C11
+C12=$C12
+C13=$C13
+C14=$C14
+C15=$C15
+PALETTE
 }
 
 apply_current() {
     local session
     session=$(tmux display-message -p '#{session_name}')
+    # skip popup sessions (name@parent pattern) — they shouldn't repaint the terminal
+    [[ "$session" == *@* ]] && return 0
     apply "$session"
 }
 
@@ -360,9 +386,11 @@ preview() {
 hook_init() {
     local ttmux_dir="$1"
     local cmd="run-shell '${ttmux_dir}/scripts/colorscheme apply-current'"
-    # apply colorscheme whenever the client switches sessions or a new session is created
+    # apply colorscheme on any session lifecycle event that could change the active palette
     tmux set-hook -g client-session-changed "$cmd"
+    tmux set-hook -g client-attached "$cmd"
     tmux set-hook -g after-new-session "$cmd"
+    tmux set-hook -g session-renamed "$cmd"
 }
 
 # --- dispatch ------------------------------------------------------------

@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+#
+# popup-keys — per-program key tables for popup sessions
+#
+# Programs declare the keybinds available in their popup context:
+#   popup-keys bind <table> <key> <command...>
+#
+# Then bracket their display-popup call:
+#   popup-keys open <table> <session>
+#   tmux display-popup -E '...'
+#   popup-keys close <session>
+#
+# open sets prefix=None and key-table on the target session so the
+# popup client only sees the declared bindings. close restores defaults.
+#
+# Usage:
+#   popup-keys bind <table> <key> <cmd...>       Register a keybind in a popup table
+#   popup-keys open <table> <session>             Activate a popup key table on session
+#   popup-keys close <session>                    Restore default key table on session
+
+set -euo pipefail
+
+bind() {
+    local table="$1" key="$2"
+    shift 2
+    local cmd="$*"
+
+    local prefix
+    prefix=$(tmux show-option -gqv prefix)
+
+    # ensure the root-level table routes prefix to <table>-prefix
+    tmux bind-key -T "$table" "$prefix" switch-client -T "${table}-prefix"
+
+    # register the keybind
+    tmux bind-key -T "${table}-prefix" "$key" $cmd
+}
+
+open() {
+    local table="$1" session="$2"
+
+    # copy root-table bindings into the popup table so non-prefix
+    # keys (PageUp, mouse, etc.) keep working
+    local prefix
+    prefix=$(tmux show-option -gqv prefix)
+    "$(dirname "$0")/copy-keys" root "$table" "$prefix"
+
+    # disable prefix so the prefix key falls through to the custom root table
+    tmux set-option -t "$session" prefix None
+    tmux set-option -t "$session" key-table "$table"
+}
+
+close() {
+    local session="$1"
+    tmux set-option -t "$session" -u prefix
+    tmux set-option -t "$session" -u key-table
+}
+
+cmd="${1:-}"
+case "$cmd" in
+    bind)
+        [[ -z "${2:-}" || -z "${3:-}" || -z "${4:-}" ]] && {
+            echo "usage: popup-keys bind <table> <key> <command...>" >&2; exit 1
+        }
+        shift; bind "$@"
+        ;;
+    open)
+        [[ -z "${2:-}" || -z "${3:-}" ]] && { echo "usage: popup-keys open <table> <session>" >&2; exit 1; }
+        open "$2" "$3"
+        ;;
+    close)
+        [[ -z "${2:-}" ]] && { echo "usage: popup-keys close <session>" >&2; exit 1; }
+        close "$2"
+        ;;
+    *) echo "usage: popup-keys {bind|open|close}" >&2; exit 1 ;;
+esac

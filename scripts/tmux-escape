@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+#
+# tmux-escape — encode/decode strings for safe shell↔tmux transport
+#
+# Encoding replaces all single quotes with the '\'' idiom and wraps
+# the result in single quotes. This produces a string that survives
+# one layer of shell expansion and arrives intact as a tmux argument.
+#
+# Usage:
+#   tmux-escape encode <string>     Emit shell-safe quoted string
+#   tmux-escape decode <string>     Reverse the encoding
+#   tmux-escape test                Run self-tests
+
+set -euo pipefail
+
+encode() {
+    local s="$1"
+    # replace ' with '\'' (end quote, escaped quote, start quote)
+    s="${s//\'/\'\\\'\'}"
+    printf "'%s'" "$s"
+}
+
+decode() {
+    local s="$1"
+    # strip outer single quotes
+    if [[ "${s:0:1}" == "'" && "${s: -1}" == "'" ]]; then
+        s="${s:1:${#s}-2}"
+    fi
+    # restore '\'' back to '
+    s="${s//\'\\\'\'/\'}"
+    printf '%s' "$s"
+}
+
+run_tests() {
+    local pass=0 fail=0
+
+    assert_roundtrip() {
+        local input="$1"
+        local encoded decoded
+        encoded=$(encode "$input")
+        decoded=$(decode "$encoded")
+        if [[ "$decoded" == "$input" ]]; then
+            pass=$(( pass + 1 ))
+        else
+            echo "FAIL: roundtrip"
+            echo "  input:   $input"
+            echo "  encoded: $encoded"
+            echo "  decoded: $decoded"
+            fail=$(( fail + 1 ))
+        fi
+    }
+
+    assert_shell_safe() {
+        local input="$1"
+        local encoded decoded
+        encoded=$(encode "$input")
+        # the encoded string should survive eval assignment
+        eval "decoded=$encoded"
+        if [[ "$decoded" == "$input" ]]; then
+            pass=$(( pass + 1 ))
+        else
+            echo "FAIL: shell-safe"
+            echo "  input:   $input"
+            echo "  encoded: $encoded"
+            echo "  decoded: $decoded"
+            fail=$(( fail + 1 ))
+        fi
+    }
+
+    # basic strings
+    assert_roundtrip "hello world"
+    assert_shell_safe "hello world"
+
+    # single quotes
+    assert_roundtrip "it's a test"
+    assert_shell_safe "it's a test"
+
+    # double quotes
+    assert_roundtrip 'say "hello"'
+    assert_shell_safe 'say "hello"'
+
+    # mixed quotes
+    assert_roundtrip "it's a \"test\""
+    assert_shell_safe "it's a \"test\""
+
+    # shell metacharacters
+    assert_roundtrip 'echo $HOME && rm -rf /'
+    assert_shell_safe 'echo $HOME && rm -rf /'
+
+    # backticks
+    assert_roundtrip 'run `uname`'
+    assert_shell_safe 'run `uname`'
+
+    # tmux format strings
+    assert_roundtrip '#{m:agent@*,#{session_name}}'
+    assert_shell_safe '#{m:agent@*,#{session_name}}'
+
+    # real bind-action from edit-selection
+    assert_roundtrip 'send-keys -X copy-pipe-and-cancel "cat > /tmp/ttmux-edit-selection && tmux split-window -h '\''nvim /tmp/ttmux-edit-selection'\''"'
+    assert_shell_safe 'send-keys -X copy-pipe-and-cancel "cat > /tmp/ttmux-edit-selection && tmux split-window -h '\''nvim /tmp/ttmux-edit-selection'\''"'
+
+    # empty string
+    assert_roundtrip ""
+    assert_shell_safe ""
+
+    # newlines
+    assert_roundtrip $'line1\nline2'
+    assert_shell_safe $'line1\nline2'
+
+    echo "$pass passed, $fail failed"
+    [[ $fail -eq 0 ]]
+}
+
+cmd="${1:-}"
+case "$cmd" in
+    encode)
+        [[ $# -lt 2 ]] && { echo "usage: tmux-escape encode <string>" >&2; exit 1; }
+        encode "$2"
+        ;;
+    decode)
+        [[ $# -lt 2 ]] && { echo "usage: tmux-escape decode <string>" >&2; exit 1; }
+        decode "$2"
+        ;;
+    test) run_tests ;;
+    *) echo "usage: tmux-escape {encode|decode|test}" >&2; exit 1 ;;
+esac

@@ -45,6 +45,10 @@
             chmod +x $out/share/ttmux/scripts/clean-context
             chmod +x $out/share/ttmux/scripts/debug-run
             chmod +x $out/share/ttmux/scripts/colorscheme
+            chmod +x $out/share/ttmux/scripts/bind-programs
+            chmod +x $out/share/ttmux/scripts/popup-keys
+            chmod +x $out/share/ttmux/scripts/tmux-escape
+            chmod +x $out/share/ttmux/scripts/copy-keys
 
             wrapProgram $out/share/ttmux/scripts/clean-context \
               --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.perl ]}
@@ -54,6 +58,14 @@
 
             wrapProgram $out/share/ttmux/scripts/debug-run \
               --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.coreutils ]}
+
+            chmod +x $out/share/ttmux/scripts/telescope
+            wrapProgram $out/share/ttmux/scripts/telescope \
+              --prefix PATH : ${pkgs.lib.makeBinPath [
+                pkgs.coreutils pkgs.curl pkgs.w3m pkgs.jq
+                pkgs.xmlstarlet pkgs.surfraw pkgs.fzf
+              ]} \
+              --suffix XDG_CONFIG_DIRS : "${pkgs.surfraw}/etc/xdg"
 
             runHook postInstall
           '';
