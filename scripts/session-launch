@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+#
+# session-launch — create a tmux session if needed, then switch to it
+#
+# Usage:
+#   session-launch <session-name> [<working-dir>] [<command>]
+
+set -euo pipefail
+
+session="${1:?usage: session-launch <session-name> [working-dir] [command]}"
+workdir="${2:-}"
+cmd="${3:-}"
+
+if ! tmux has-session -t "$session" 2>/dev/null; then
+    args=(-d -s "$session")
+    [[ -n "$workdir" ]] && args+=(-c "$workdir")
+    [[ -n "$cmd" ]] && args+=("$cmd")
+    tmux new-session "${args[@]}"
+fi
+
+tmux switch-client -t "$session"

@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+#
+# fzf-dispatch — list, select with fzf, dispatch on selection
+#
+# Reads tmux session options for the list command, fzf arguments,
+# and dispatch command. Pipes list into fzf, then runs dispatch
+# with {} replaced by the selection. Exits silently on cancel or
+# empty selection.
+#
+# Usage:
+#   fzf-dispatch <list-opt> <fzf-opt> <dispatch-opt>
+#
+# Each argument is the name of a tmux session option (without @).
+# Example:
+#   fzf-dispatch cmdSshList cmdSshFzf cmdSshLaunch
+
+set -euo pipefail
+
+list_cmd=$(tmux show-option -qv "@$1")
+fzf_args=$(tmux show-option -qv "@$2")
+dispatch_cmd=$(tmux show-option -qv "@$3")
+
+[[ -n "$list_cmd" ]] || { echo "fzf-dispatch: option @$1 not set" >&2; exit 1; }
+[[ -n "$dispatch_cmd" ]] || { echo "fzf-dispatch: option @$3 not set" >&2; exit 1; }
+
+selection=$(eval "$list_cmd" | eval "fzf $fzf_args") || exit 0
+[[ -n "$selection" ]] || exit 0
+
+dispatch_cmd="${dispatch_cmd//\{\}/$selection}"
+eval "$dispatch_cmd"

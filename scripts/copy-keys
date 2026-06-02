@@ -14,7 +14,7 @@ from_table="${1:?usage: copy-keys <from-table> <to-table> [exclude-key]}"
 to_table="${2:?usage: copy-keys <from-table> <to-table> [exclude-key]}"
 exclude_key="${3:-}"
 
-tmpfile=$(mktemp)
+tmpfile=$(mktemp "${TMPDIR:-/tmp}/ttmux-copy-keys.XXXXXX")
 trap 'rm -f "$tmpfile"' EXIT
 
 tmux list-keys -T "$from_table" 2>/dev/null \

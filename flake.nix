@@ -31,38 +31,62 @@
           };
 
           nativeBuildInputs = [ pkgs.makeWrapper ];
-          buildInputs = [ pkgs.perl ];
 
           dontBuild = true;
 
-          installPhase = ''
+          installPhase = let
+            # common utilities needed across platforms (especially macOS)
+            coreTools = pkgs.lib.makeBinPath [
+              pkgs.coreutils
+              pkgs.gnused
+              pkgs.gnugrep
+              pkgs.gawk
+              pkgs.findutils
+            ];
+          in ''
             runHook preInstall
 
             mkdir -p $out/share/ttmux
             cp tmux.conf init.tmux.conf options.tmux.conf bindings.tmux.conf $out/share/ttmux/
             cp -r programs $out/share/ttmux/
             cp -r scripts $out/share/ttmux/
-            chmod +x $out/share/ttmux/scripts/clean-context
-            chmod +x $out/share/ttmux/scripts/debug-run
-            chmod +x $out/share/ttmux/scripts/colorscheme
-            chmod +x $out/share/ttmux/scripts/bind-programs
-            chmod +x $out/share/ttmux/scripts/popup-keys
-            chmod +x $out/share/ttmux/scripts/tmux-escape
-            chmod +x $out/share/ttmux/scripts/copy-keys
+
+            # make all scripts executable
+            chmod +x $out/share/ttmux/scripts/*
+
+            # --- wrap scripts with their runtime dependencies ---
 
             wrapProgram $out/share/ttmux/scripts/clean-context \
               --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.perl ]}
 
             wrapProgram $out/share/ttmux/scripts/colorscheme \
-              --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.coreutils pkgs.gawk ]}
+              --prefix PATH : ${coreTools}
 
             wrapProgram $out/share/ttmux/scripts/debug-run \
-              --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.coreutils ]}
+              --prefix PATH : ${coreTools}
 
-            chmod +x $out/share/ttmux/scripts/telescope
+            wrapProgram $out/share/ttmux/scripts/bind-programs \
+              --prefix PATH : ${coreTools}
+
+            wrapProgram $out/share/ttmux/scripts/popup-keys \
+              --prefix PATH : ${coreTools}
+
+            wrapProgram $out/share/ttmux/scripts/copy-keys \
+              --prefix PATH : ${coreTools}
+
+            wrapProgram $out/share/ttmux/scripts/session-launch \
+              --prefix PATH : ${coreTools}
+
+            wrapProgram $out/share/ttmux/scripts/agent-popup \
+              --prefix PATH : ${coreTools}
+
+            wrapProgram $out/share/ttmux/scripts/fzf-dispatch \
+              --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.coreutils pkgs.fzf ]}
+
             wrapProgram $out/share/ttmux/scripts/telescope \
               --prefix PATH : ${pkgs.lib.makeBinPath [
-                pkgs.coreutils pkgs.curl pkgs.w3m pkgs.jq
+                pkgs.coreutils pkgs.gnused pkgs.gnugrep
+                pkgs.curl pkgs.w3m pkgs.jq
                 pkgs.xmlstarlet pkgs.surfraw pkgs.fzf
               ]} \
               --suffix XDG_CONFIG_DIRS : "${pkgs.surfraw}/etc/xdg"
@@ -72,7 +96,7 @@
 
           meta = with pkgs.lib; {
             description = "Modular tmux configuration framework";
-            platforms = platforms.all;
+            platforms = platforms.unix;
           };
         };
       });
