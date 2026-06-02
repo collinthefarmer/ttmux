@@ -30,6 +30,7 @@
             ];
           };
 
+          nativeBuildInputs = [ pkgs.makeWrapper ];
           buildInputs = [ pkgs.perl ];
 
           dontBuild = true;
@@ -43,6 +44,16 @@
             cp -r scripts $out/share/ttmux/
             chmod +x $out/share/ttmux/scripts/clean-context
             chmod +x $out/share/ttmux/scripts/debug-run
+            chmod +x $out/share/ttmux/scripts/colorscheme
+
+            wrapProgram $out/share/ttmux/scripts/clean-context \
+              --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.perl ]}
+
+            wrapProgram $out/share/ttmux/scripts/colorscheme \
+              --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.coreutils pkgs.gawk ]}
+
+            wrapProgram $out/share/ttmux/scripts/debug-run \
+              --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.coreutils ]}
 
             runHook postInstall
           '';

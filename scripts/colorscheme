@@ -295,13 +295,7 @@ apply() {
 apply_current() {
     local session
     session=$(tmux display-message -p '#{session_name}')
-    local scheme
-    scheme=$(tmux show-option -qv @colorscheme 2>/dev/null || true)
-    if [[ -z "$scheme" ]]; then
-        return 0
-    fi
-    load_scheme "$scheme"
-    emit_osc_palette
+    apply "$session"
 }
 
 save() {
@@ -365,9 +359,10 @@ preview() {
 
 hook_init() {
     local ttmux_dir="$1"
-    # re-apply the terminal palette whenever the client switches sessions
-    tmux set-hook -g client-session-changed \
-        "run-shell '${ttmux_dir}/scripts/colorscheme apply-current'"
+    local cmd="run-shell '${ttmux_dir}/scripts/colorscheme apply-current'"
+    # apply colorscheme whenever the client switches sessions or a new session is created
+    tmux set-hook -g client-session-changed "$cmd"
+    tmux set-hook -g after-new-session "$cmd"
 }
 
 # --- dispatch ------------------------------------------------------------
