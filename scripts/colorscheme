@@ -1,0 +1,403 @@
+#!/usr/bin/env bash
+#
+# colorscheme — generate, save, and apply terminal color schemes via tmux
+#
+# Usage:
+#   colorscheme generate <session-name>   Print the full palette as shell variables
+#   colorscheme apply <session-name>       Apply scheme to session (terminal + tmux chrome)
+#   colorscheme apply-current              Apply scheme for the current session (used by hooks)
+#   colorscheme save <session-name>        Write scheme to ~/.local/share/ttmux/schemes/<name>.conf
+#   colorscheme preview                    Cycle through all schemes on the current session
+#   colorscheme hook-init <ttmux-dir>      Install the client-session-changed hook
+#
+# Changes the terminal itself — the 16 ANSI colors, default foreground,
+# background, and cursor — via OSC escape sequences pushed through tmux
+# passthrough. Also styles tmux status bar, pane borders, and mode colors
+# to match. A session-switch hook re-applies the palette whenever you move
+# between sessions, so each project keeps its own color identity.
+
+set -euo pipefail
+
+SCHEME_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/ttmux/schemes"
+
+# --- palette definitions ------------------------------------------------
+#
+# Each scheme defines:
+#   BG, FG, CURSOR    — terminal default background, foreground, cursor
+#   C0..C15           — the 16 ANSI palette colors
+#   STATUS_BG/FG      — tmux status bar
+#   STATUS_ACTIVE_BG/FG — active window tab
+#   PANE_BORDER/ACTIVE — pane border colors
+#   MSG_BG/FG         — tmux messages
+#   MODE_BG/FG        — copy mode highlight
+
+declare -a SCHEME_NAMES=(
+    dracula
+    solarized
+    gruvbox
+    nord
+    monokai
+    rosepine
+    catppuccin
+    kanagawa
+    everforest
+    tokyonight
+)
+
+scheme_dracula() {
+    BG="#282a36"  FG="#f8f8f2"  CURSOR="#f8f8f2"
+    C0="#21222c"  C1="#ff5555"  C2="#50fa7b"  C3="#f1fa8c"
+    C4="#bd93f9"  C5="#ff79c6"  C6="#8be9fd"  C7="#f8f8f2"
+    C8="#6272a4"  C9="#ff6e6e"  C10="#69ff94" C11="#ffffa5"
+    C12="#d6acff" C13="#ff92df" C14="#a4ffff" C15="#ffffff"
+    STATUS_BG="#44475a"  STATUS_FG="#f8f8f2"
+    STATUS_ACTIVE_BG="#bd93f9"  STATUS_ACTIVE_FG="#282a36"
+    PANE_BORDER="#44475a"  PANE_ACTIVE="#bd93f9"
+    MSG_BG="#44475a"  MSG_FG="#f8f8f2"
+    MODE_BG="#44475a"  MODE_FG="#f8f8f2"
+}
+
+scheme_solarized() {
+    BG="#002b36"  FG="#839496"  CURSOR="#839496"
+    C0="#073642"  C1="#dc322f"  C2="#859900"  C3="#b58900"
+    C4="#268bd2"  C5="#d33682"  C6="#2aa198"  C7="#eee8d5"
+    C8="#002b36"  C9="#cb4b16"  C10="#586e75" C11="#657b83"
+    C12="#839496" C13="#6c71c4" C14="#93a1a1" C15="#fdf6e3"
+    STATUS_BG="#073642"  STATUS_FG="#839496"
+    STATUS_ACTIVE_BG="#268bd2"  STATUS_ACTIVE_FG="#fdf6e3"
+    PANE_BORDER="#586e75"  PANE_ACTIVE="#268bd2"
+    MSG_BG="#073642"  MSG_FG="#eee8d5"
+    MODE_BG="#073642"  MODE_FG="#eee8d5"
+}
+
+scheme_gruvbox() {
+    BG="#282828"  FG="#ebdbb2"  CURSOR="#ebdbb2"
+    C0="#282828"  C1="#cc241d"  C2="#98971a"  C3="#d79921"
+    C4="#458588"  C5="#b16286"  C6="#689d6a"  C7="#a89984"
+    C8="#928374"  C9="#fb4934"  C10="#b8bb26" C11="#fabd2f"
+    C12="#83a598" C13="#d3869b" C14="#8ec07c" C15="#ebdbb2"
+    STATUS_BG="#3c3836"  STATUS_FG="#ebdbb2"
+    STATUS_ACTIVE_BG="#d79921"  STATUS_ACTIVE_FG="#282828"
+    PANE_BORDER="#504945"  PANE_ACTIVE="#d79921"
+    MSG_BG="#504945"  MSG_FG="#ebdbb2"
+    MODE_BG="#504945"  MODE_FG="#ebdbb2"
+}
+
+scheme_nord() {
+    BG="#2e3440"  FG="#d8dee9"  CURSOR="#d8dee9"
+    C0="#3b4252"  C1="#bf616a"  C2="#a3be8c"  C3="#ebcb8b"
+    C4="#81a1c1"  C5="#b48ead"  C6="#88c0d0"  C7="#e5e9f0"
+    C8="#4c566a"  C9="#bf616a"  C10="#a3be8c" C11="#ebcb8b"
+    C12="#81a1c1" C13="#b48ead" C14="#8fbcbb" C15="#eceff4"
+    STATUS_BG="#3b4252"  STATUS_FG="#d8dee9"
+    STATUS_ACTIVE_BG="#88c0d0"  STATUS_ACTIVE_FG="#2e3440"
+    PANE_BORDER="#4c566a"  PANE_ACTIVE="#88c0d0"
+    MSG_BG="#3b4252"  MSG_FG="#eceff4"
+    MODE_BG="#3b4252"  MODE_FG="#eceff4"
+}
+
+scheme_monokai() {
+    BG="#272822"  FG="#f8f8f2"  CURSOR="#f8f8f0"
+    C0="#272822"  C1="#f92672"  C2="#a6e22e"  C3="#f4bf75"
+    C4="#66d9ef"  C5="#ae81ff"  C6="#a1efe4"  C7="#f8f8f2"
+    C8="#75715e"  C9="#f92672"  C10="#a6e22e" C11="#f4bf75"
+    C12="#66d9ef" C13="#ae81ff" C14="#a1efe4" C15="#f9f8f5"
+    STATUS_BG="#383830"  STATUS_FG="#f8f8f2"
+    STATUS_ACTIVE_BG="#a6e22e"  STATUS_ACTIVE_FG="#272822"
+    PANE_BORDER="#49483e"  PANE_ACTIVE="#a6e22e"
+    MSG_BG="#49483e"  MSG_FG="#f8f8f2"
+    MODE_BG="#49483e"  MODE_FG="#f8f8f2"
+}
+
+scheme_rosepine() {
+    BG="#191724"  FG="#e0def4"  CURSOR="#e0def4"
+    C0="#26233a"  C1="#eb6f92"  C2="#31748f"  C3="#f6c177"
+    C4="#9ccfd8"  C5="#c4a7e7"  C6="#ebbcba"  C7="#e0def4"
+    C8="#6e6a86"  C9="#eb6f92"  C10="#31748f" C11="#f6c177"
+    C12="#9ccfd8" C13="#c4a7e7" C14="#ebbcba" C15="#e0def4"
+    STATUS_BG="#26233a"  STATUS_FG="#e0def4"
+    STATUS_ACTIVE_BG="#c4a7e7"  STATUS_ACTIVE_FG="#191724"
+    PANE_BORDER="#403d52"  PANE_ACTIVE="#c4a7e7"
+    MSG_BG="#403d52"  MSG_FG="#e0def4"
+    MODE_BG="#403d52"  MODE_FG="#e0def4"
+}
+
+scheme_catppuccin() {
+    BG="#1e1e2e"  FG="#cdd6f4"  CURSOR="#f5e0dc"
+    C0="#45475a"  C1="#f38ba8"  C2="#a6e3a1"  C3="#f9e2af"
+    C4="#89b4fa"  C5="#f5c2e7"  C6="#94e2d5"  C7="#bac2de"
+    C8="#585b70"  C9="#f38ba8"  C10="#a6e3a1" C11="#f9e2af"
+    C12="#89b4fa" C13="#f5c2e7" C14="#94e2d5" C15="#a6adc8"
+    STATUS_BG="#313244"  STATUS_FG="#cdd6f4"
+    STATUS_ACTIVE_BG="#cba6f7"  STATUS_ACTIVE_FG="#1e1e2e"
+    PANE_BORDER="#45475a"  PANE_ACTIVE="#cba6f7"
+    MSG_BG="#45475a"  MSG_FG="#cdd6f4"
+    MODE_BG="#45475a"  MODE_FG="#cdd6f4"
+}
+
+scheme_kanagawa() {
+    BG="#1f1f28"  FG="#dcd7ba"  CURSOR="#c8c093"
+    C0="#16161d"  C1="#c34043"  C2="#76946a"  C3="#c0a36e"
+    C4="#7e9cd8"  C5="#957fb8"  C6="#6a9589"  C7="#c8c093"
+    C8="#727169"  C9="#e82424"  C10="#98bb6c" C11="#e6c384"
+    C12="#7fb4ca" C13="#938aa9" C14="#7aa89f" C15="#dcd7ba"
+    STATUS_BG="#2a2a37"  STATUS_FG="#dcd7ba"
+    STATUS_ACTIVE_BG="#7e9cd8"  STATUS_ACTIVE_FG="#1f1f28"
+    PANE_BORDER="#363646"  PANE_ACTIVE="#7e9cd8"
+    MSG_BG="#363646"  MSG_FG="#dcd7ba"
+    MODE_BG="#363646"  MODE_FG="#dcd7ba"
+}
+
+scheme_everforest() {
+    BG="#2d353b"  FG="#d3c6aa"  CURSOR="#d3c6aa"
+    C0="#343f44"  C1="#e67e80"  C2="#a7c080"  C3="#dbbc7f"
+    C4="#7fbbb3"  C5="#d699b6"  C6="#83c092"  C7="#d3c6aa"
+    C8="#4f585e"  C9="#e67e80"  C10="#a7c080" C11="#dbbc7f"
+    C12="#7fbbb3" C13="#d699b6" C14="#83c092" C15="#d3c6aa"
+    STATUS_BG="#374145"  STATUS_FG="#d3c6aa"
+    STATUS_ACTIVE_BG="#a7c080"  STATUS_ACTIVE_FG="#2d353b"
+    PANE_BORDER="#4f585e"  PANE_ACTIVE="#a7c080"
+    MSG_BG="#4f585e"  MSG_FG="#d3c6aa"
+    MODE_BG="#4f585e"  MODE_FG="#d3c6aa"
+}
+
+scheme_tokyonight() {
+    BG="#1a1b26"  FG="#a9b1d6"  CURSOR="#c0caf5"
+    C0="#15161e"  C1="#f7768e"  C2="#9ece6a"  C3="#e0af68"
+    C4="#7aa2f7"  C5="#bb9af7"  C6="#7dcfff"  C7="#a9b1d6"
+    C8="#414868"  C9="#f7768e"  C10="#9ece6a" C11="#e0af68"
+    C12="#7aa2f7" C13="#bb9af7" C14="#7dcfff" C15="#c0caf5"
+    STATUS_BG="#24283b"  STATUS_FG="#a9b1d6"
+    STATUS_ACTIVE_BG="#7aa2f7"  STATUS_ACTIVE_FG="#1a1b26"
+    PANE_BORDER="#3b4261"  PANE_ACTIVE="#7aa2f7"
+    MSG_BG="#3b4261"  MSG_FG="#c0caf5"
+    MODE_BG="#3b4261"  MODE_FG="#c0caf5"
+}
+
+# --- core logic ----------------------------------------------------------
+
+hash_name() {
+    printf '%s' "$1" | cksum | awk '{print $1}'
+}
+
+pick_scheme() {
+    local name="$1"
+    local h
+    h=$(hash_name "$name")
+    local idx=$(( h % ${#SCHEME_NAMES[@]} ))
+    echo "${SCHEME_NAMES[$idx]}"
+}
+
+load_scheme() {
+    "scheme_${1}"
+}
+
+# Resolve the TTY of the current tmux client so we can write escape
+# sequences directly to the outer terminal, bypassing run-shell's
+# stdout capture (which would display them as a tmux message).
+client_tty() {
+    tmux display-message -p '#{client_tty}'
+}
+
+# Send an OSC escape sequence through tmux passthrough to the outer terminal.
+# This reprograms the actual terminal emulator's colors, not tmux's.
+osc() {
+    # \ePtmux;\e  ...  \e\\   — DCS passthrough wrapper
+    # Inside: \e]<code>;<value>\a — the OSC payload
+    printf '\ePtmux;\e\e]%s\a\e\\' "$1"
+}
+
+emit_osc_palette() {
+    local tty
+    tty=$(client_tty)
+
+    {
+        osc "10;$FG"       # default foreground
+        osc "11;$BG"       # default background
+        osc "12;$CURSOR"   # cursor color
+
+        local i color
+        for i in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+            eval "color=\$C${i}"
+            osc "4;${i};${color}"
+        done
+    } > "$tty"
+}
+
+generate() {
+    local session="$1"
+    local scheme
+    scheme=$(pick_scheme "$session")
+    load_scheme "$scheme"
+
+    echo "SCHEME_NAME=$scheme"
+    echo "BG=$BG"
+    echo "FG=$FG"
+    echo "CURSOR=$CURSOR"
+    local i color
+    for i in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+        eval "color=\$C${i}"
+        echo "C${i}=$color"
+    done
+    echo "STATUS_BG=$STATUS_BG"
+    echo "STATUS_FG=$STATUS_FG"
+    echo "STATUS_ACTIVE_BG=$STATUS_ACTIVE_BG"
+    echo "STATUS_ACTIVE_FG=$STATUS_ACTIVE_FG"
+    echo "PANE_BORDER=$PANE_BORDER"
+    echo "PANE_ACTIVE=$PANE_ACTIVE"
+    echo "MSG_BG=$MSG_BG"
+    echo "MSG_FG=$MSG_FG"
+    echo "MODE_BG=$MODE_BG"
+    echo "MODE_FG=$MODE_FG"
+}
+
+apply() {
+    local session="$1"
+    local scheme
+    scheme=$(pick_scheme "$session")
+    load_scheme "$scheme"
+
+    local t="-t $session"
+
+    # --- terminal colors via OSC passthrough ---
+    # enable passthrough so OSC sequences reach the outer terminal
+    tmux set-option $t allow-passthrough on
+
+    # emit the palette-reprogramming sequences to stdout, which tmux
+    # forwards through the controlling terminal of whoever called us
+    emit_osc_palette
+
+    # --- tmux pane colors (so tmux itself renders bg/fg correctly) ---
+    tmux set-option $t window-style "bg=$BG,fg=$FG"
+    tmux set-option $t window-active-style "bg=$BG,fg=$FG"
+
+    # --- tmux chrome ---
+    tmux set-option $t status-style "bg=$STATUS_BG,fg=$STATUS_FG"
+    tmux set-option $t status-left-style "bg=$STATUS_BG,fg=$STATUS_FG,bold"
+    tmux set-option $t status-right-style "bg=$STATUS_BG,fg=$STATUS_FG"
+
+    tmux set-option $t window-status-style "bg=$STATUS_BG,fg=$STATUS_FG"
+    tmux set-option $t window-status-current-style "bg=$STATUS_ACTIVE_BG,fg=$STATUS_ACTIVE_FG,bold"
+    tmux set-option $t window-status-bell-style "bg=$STATUS_BG,fg=$STATUS_FG,bold"
+
+    tmux set-option $t pane-border-style "fg=$PANE_BORDER"
+    tmux set-option $t pane-active-border-style "fg=$PANE_ACTIVE"
+
+    tmux set-option $t message-style "bg=$MSG_BG,fg=$MSG_FG"
+    tmux set-option $t message-command-style "bg=$MSG_BG,fg=$MSG_FG"
+
+    tmux set-option $t mode-style "bg=$MODE_BG,fg=$MODE_FG"
+
+    # stash scheme name for introspection / hook re-application
+    tmux set-option $t @colorscheme "$scheme"
+}
+
+apply_current() {
+    local session
+    session=$(tmux display-message -p '#{session_name}')
+    local scheme
+    scheme=$(tmux show-option -qv @colorscheme 2>/dev/null || true)
+    if [[ -z "$scheme" ]]; then
+        return 0
+    fi
+    load_scheme "$scheme"
+    emit_osc_palette
+}
+
+save() {
+    local session="$1"
+    local scheme
+    scheme=$(pick_scheme "$session")
+    load_scheme "$scheme"
+
+    mkdir -p "$SCHEME_DIR"
+
+    local safe_name
+    safe_name=$(printf '%s' "$session" | tr '/' '-')
+    local outfile="$SCHEME_DIR/${safe_name}.conf"
+
+    cat > "$outfile" <<EOF
+# colorscheme: $scheme (generated for session "$session")
+#
+# Terminal palette (OSC)
+# FG=$FG  BG=$BG  CURSOR=$CURSOR
+# C0=$C0   C1=$C1   C2=$C2   C3=$C3
+# C4=$C4   C5=$C5   C6=$C6   C7=$C7
+# C8=$C8   C9=$C9   C10=$C10  C11=$C11
+# C12=$C12  C13=$C13  C14=$C14  C15=$C15
+#
+# tmux options
+set-option window-style "bg=$BG,fg=$FG"
+set-option window-active-style "bg=$BG,fg=$FG"
+set-option status-style "bg=$STATUS_BG,fg=$STATUS_FG"
+set-option status-left-style "bg=$STATUS_BG,fg=$STATUS_FG,bold"
+set-option status-right-style "bg=$STATUS_BG,fg=$STATUS_FG"
+set-option window-status-style "bg=$STATUS_BG,fg=$STATUS_FG"
+set-option window-status-current-style "bg=$STATUS_ACTIVE_BG,fg=$STATUS_ACTIVE_FG,bold"
+set-option window-status-bell-style "bg=$STATUS_BG,fg=$STATUS_FG,bold"
+set-option pane-border-style "fg=$PANE_BORDER"
+set-option pane-active-border-style "fg=$PANE_ACTIVE"
+set-option message-style "bg=$MSG_BG,fg=$MSG_FG"
+set-option message-command-style "bg=$MSG_BG,fg=$MSG_FG"
+set-option mode-style "bg=$MODE_BG,fg=$MODE_FG"
+EOF
+
+    echo "$outfile"
+}
+
+preview() {
+    for scheme in "${SCHEME_NAMES[@]}"; do
+        load_scheme "$scheme"
+        emit_osc_palette
+        tmux set-option status-style "bg=$STATUS_BG,fg=$STATUS_FG"
+        tmux set-option status-left-style "bg=$STATUS_BG,fg=$STATUS_FG,bold"
+        tmux set-option window-status-current-style "bg=$STATUS_ACTIVE_BG,fg=$STATUS_ACTIVE_FG,bold"
+        tmux set-option window-style "bg=$BG,fg=$FG"
+        tmux set-option window-active-style "bg=$BG,fg=$FG"
+        tmux set-option pane-border-style "fg=$PANE_BORDER"
+        tmux set-option pane-active-border-style "fg=$PANE_ACTIVE"
+        tmux set-option message-style "bg=$MSG_BG,fg=$MSG_FG"
+        tmux set-option mode-style "bg=$MODE_BG,fg=$MODE_FG"
+        tmux display-message "scheme: $scheme"
+        sleep 1.5
+    done
+}
+
+hook_init() {
+    local ttmux_dir="$1"
+    # re-apply the terminal palette whenever the client switches sessions
+    tmux set-hook -g client-session-changed \
+        "run-shell '${ttmux_dir}/scripts/colorscheme apply-current'"
+}
+
+# --- dispatch ------------------------------------------------------------
+
+cmd="${1:-}"
+case "$cmd" in
+    generate)
+        [[ -z "${2:-}" ]] && { echo "usage: colorscheme generate <session-name>" >&2; exit 1; }
+        generate "$2"
+        ;;
+    apply)
+        [[ -z "${2:-}" ]] && { echo "usage: colorscheme apply <session-name>" >&2; exit 1; }
+        apply "$2"
+        ;;
+    apply-current)
+        apply_current
+        ;;
+    save)
+        [[ -z "${2:-}" ]] && { echo "usage: colorscheme save <session-name>" >&2; exit 1; }
+        save "$2"
+        ;;
+    preview)
+        preview
+        ;;
+    hook-init)
+        [[ -z "${2:-}" ]] && { echo "usage: colorscheme hook-init <ttmux-dir>" >&2; exit 1; }
+        hook_init "$2"
+        ;;
+    *)
+        echo "usage: colorscheme {generate|apply|apply-current|save|preview|hook-init} [args]" >&2
+        exit 1
+        ;;
+esac
