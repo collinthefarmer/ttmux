@@ -13,39 +13,39 @@
       });
     in
     {
-      packages = forAllSystems ({ pkgs }: {
-        default = pkgs.stdenvNoCC.mkDerivation {
-          pname = "ttmux";
-          version = "0.1.0";
+      packages = forAllSystems ({ pkgs }:
+        let
+          ttmux = pkgs.stdenvNoCC.mkDerivation {
+            pname = "ttmux";
+            version = "0.1.0";
 
-          src = pkgs.lib.fileset.toSource {
-            root = ./.;
-            fileset = pkgs.lib.fileset.unions [
-              ./tmux.conf
-              ./init.tmux.conf
-              ./options.tmux.conf
-              ./bindings.tmux.conf
-              ./programs
-              ./scripts
-              ./sources
-            ];
-          };
+            src = pkgs.lib.fileset.toSource {
+              root = ./.;
+              fileset = pkgs.lib.fileset.unions [
+                ./tmux.conf
+                ./init.tmux.conf
+                ./options.tmux.conf
+                ./bindings.tmux.conf
+                ./programs
+                ./scripts
+                ./sources
+              ];
+            };
 
-          nativeBuildInputs = [ pkgs.makeWrapper ];
-          propagatedBuildInputs = [ pkgs.tmux ];
+            nativeBuildInputs = [ pkgs.makeWrapper ];
 
-          dontBuild = true;
+            dontBuild = true;
 
-          installPhase = let
-            # common utilities needed across platforms (especially macOS)
-            coreTools = pkgs.lib.makeBinPath [
-              pkgs.coreutils
-              pkgs.gnused
-              pkgs.gnugrep
-              pkgs.gawk
-              pkgs.findutils
-            ];
-          in ''
+            installPhase = let
+              # common utilities needed across platforms (especially macOS)
+              coreTools = pkgs.lib.makeBinPath [
+                pkgs.coreutils
+                pkgs.gnused
+                pkgs.gnugrep
+                pkgs.gawk
+                pkgs.findutils
+              ];
+            in ''
             runHook preInstall
 
             mkdir -p $out/bin $out/share/ttmux
@@ -120,12 +120,17 @@
             runHook postInstall
           '';
 
-          meta = with pkgs.lib; {
-            description = "Modular tmux configuration framework";
-            platforms = platforms.unix;
+            meta = with pkgs.lib; {
+              description = "Modular tmux configuration framework";
+              platforms = platforms.unix;
+            };
           };
-        };
-      });
+        in {
+          default = pkgs.symlinkJoin {
+            name = "ttmux";
+            paths = [ ttmux pkgs.tmux ];
+          };
+        });
 
       overlays.default = final: prev: {
         ttmux = self.packages.${prev.system}.default;
