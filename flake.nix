@@ -47,11 +47,14 @@
           in ''
             runHook preInstall
 
-            mkdir -p $out/share/ttmux
+            mkdir -p $out/bin $out/share/ttmux
             cp tmux.conf init.tmux.conf options.tmux.conf bindings.tmux.conf $out/share/ttmux/
             cp -r programs $out/share/ttmux/
             cp -r scripts $out/share/ttmux/
             cp -r sources $out/share/ttmux/
+
+            makeWrapper ${pkgs.tmux}/bin/tmux $out/bin/ttmux \
+              --add-flags "-L ttmux -f $out/share/ttmux/tmux.conf"
 
             # make all scripts executable
             chmod +x $out/share/ttmux/scripts/*
