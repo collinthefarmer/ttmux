@@ -2,7 +2,7 @@
   description = "ttmux - modular tmux configuration framework";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    nixpkgs.url = "github:NixOS/nixpkgs/b86751bc4085f48661017fa226dee99fab6c651b"; # tmux 3.6a
   };
 
   outputs = { self, nixpkgs }:
@@ -32,6 +32,7 @@
           };
 
           nativeBuildInputs = [ pkgs.makeWrapper ];
+          propagatedBuildInputs = [ pkgs.tmux ];
 
           dontBuild = true;
 
