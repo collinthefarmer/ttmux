@@ -1,0 +1,348 @@
+#!/usr/bin/env bash
+#
+# test-popup-geometry — unit tests for popup sliding/clipping math
+#
+# Tests the AABB intersection logic that determines visible width,
+# position, and content offset when a popup slides into a container.
+# All tmux calls are mocked.
+#
+# Usage:
+#   test-popup-geometry [--verbose]
+
+set -euo pipefail
+
+verbose=0
+[[ "${1:-}" == "--verbose" ]] && verbose=1
+
+pass=0
+fail=0
+total=0
+
+# ── test harness ───────────────────────────────────────────────
+
+assert_eq() {
+    local label="$1" expected="$2" actual="$3"
+    (( total++ )) || true
+    if [[ "$expected" == "$actual" ]]; then
+        (( pass++ )) || true
+        (( verbose )) && printf "  \033[32mpass\033[0m  %s\n" "$label" || true
+    else
+        (( fail++ )) || true
+        printf "  \033[31mFAIL\033[0m  %s: expected '%s', got '%s'\n" \
+            "$label" "$expected" "$actual"
+    fi
+}
+
+section() {
+    printf "\n\033[1m── %s ──\033[0m\n" "$1"
+}
+
+# ── source the library under test ──────────────────────────────
+# shellcheck source=popup-geometry
+source "$(dirname "$0")/popup-geometry"
+
+# local aliases so existing tests read cleanly
+aabb_intersect()  { pg_aabb_intersect "$@"; }
+slide_position()  { pg_slide_position "$@"; }
+frame_params()    { pg_frame_params "$@"; }
+
+
+# ════════════════════════════════════════════════════════════════
+# Tests
+# ════════════════════════════════════════════════════════════════
+
+section "AABB intersection: basic cases"
+
+# fully inside
+read -r vx vy vw vh ox oy <<< "$(aabb_intersect 0 0 100 50   10 5 30 20)"
+assert_eq "fully-inside: vx"     "10" "$vx"
+assert_eq "fully-inside: vy"     "5"  "$vy"
+assert_eq "fully-inside: vw"     "30" "$vw"
+assert_eq "fully-inside: vh"     "20" "$vh"
+assert_eq "fully-inside: ox"     "0"  "$ox"
+assert_eq "fully-inside: oy"     "0"  "$oy"
+
+# no overlap on x (popup entirely to the right)
+read -r vx vy vw vh ox oy <<< "$(aabb_intersect 0 0 100 50   110 0 30 20)"
+assert_eq "no-overlap-right: vw" "0"  "$vw"
+assert_eq "no-overlap-right: vh" "20" "$vh"  # y still overlaps
+
+# no overlap on y (popup entirely above)
+read -r vx vy vw vh ox oy <<< "$(aabb_intersect 0 0 100 50   10 -30 30 20)"
+assert_eq "no-overlap-above: vw" "30" "$vw"  # x still overlaps
+assert_eq "no-overlap-above: vh" "0"  "$vh"
+
+# truly no overlap at all
+read -r vx vy vw vh ox oy <<< "$(aabb_intersect 0 0 100 50   110 60 30 20)"
+assert_eq "no-overlap-both: vw" "0"  "$vw"
+assert_eq "no-overlap-both: vh" "0"  "$vh"
+
+section "AABB intersection: partial overlaps"
+
+# popup half off the right edge
+read -r vx vy vw vh ox oy <<< "$(aabb_intersect 0 0 100 50   80 10 40 20)"
+assert_eq "clip-right: vx"     "80" "$vx"
+assert_eq "clip-right: vw"     "20" "$vw"
+assert_eq "clip-right: ox"     "0"  "$ox"
+
+# popup half off the left edge
+read -r vx vy vw vh ox oy <<< "$(aabb_intersect 0 0 100 50   -20 10 40 20)"
+assert_eq "clip-left: vx"     "0"  "$vx"
+assert_eq "clip-left: vw"     "20" "$vw"
+assert_eq "clip-left: ox"     "20" "$ox"
+
+# popup half off the bottom
+read -r vx vy vw vh ox oy <<< "$(aabb_intersect 0 0 100 50   10 40 30 20)"
+assert_eq "clip-bottom: vy"   "40" "$vy"
+assert_eq "clip-bottom: vh"   "10" "$vh"
+assert_eq "clip-bottom: oy"   "0"  "$oy"
+
+# popup half off the top
+read -r vx vy vw vh ox oy <<< "$(aabb_intersect 0 0 100 50   10 -10 30 20)"
+assert_eq "clip-top: vy"      "0"  "$vy"
+assert_eq "clip-top: vh"      "10" "$vh"
+assert_eq "clip-top: oy"      "10" "$oy"
+
+# corner overlap: bottom-right
+read -r vx vy vw vh ox oy <<< "$(aabb_intersect 0 0 100 50   90 45 30 20)"
+assert_eq "corner-br: vw"     "10" "$vw"
+assert_eq "corner-br: vh"     "5"  "$vh"
+assert_eq "corner-br: ox"     "0"  "$ox"
+assert_eq "corner-br: oy"     "0"  "$oy"
+
+section "AABB intersection: edge cases"
+
+# popup exactly fills container
+read -r vx vy vw vh ox oy <<< "$(aabb_intersect 0 0 100 50   0 0 100 50)"
+assert_eq "exact-fit: vw"     "100" "$vw"
+assert_eq "exact-fit: vh"     "50"  "$vh"
+assert_eq "exact-fit: ox"     "0"   "$ox"
+
+# zero-width intersection (touching edges)
+read -r vx vy vw vh ox oy <<< "$(aabb_intersect 0 0 100 50   100 0 30 20)"
+assert_eq "touching-right: vw" "0"  "$vw"
+
+# popup larger than container
+read -r vx vy vw vh ox oy <<< "$(aabb_intersect 0 0 100 50   -10 -10 120 70)"
+assert_eq "larger: vx"        "0"   "$vx"
+assert_eq "larger: vy"        "0"   "$vy"
+assert_eq "larger: vw"        "100" "$vw"
+assert_eq "larger: vh"        "50"  "$vh"
+assert_eq "larger: ox"        "10"  "$ox"
+assert_eq "larger: oy"        "10"  "$oy"
+
+section "Slide position: origin directions"
+
+# right-to-left slide at 0% (fully hidden)
+read -r sx sy <<< "$(slide_position right 0  20 10 40 20  100 50)"
+assert_eq "right-0%: sx"    "100" "$sx"
+assert_eq "right-0%: sy"    "10"  "$sy"
+
+# right-to-left slide at 100% (fully arrived)
+read -r sx sy <<< "$(slide_position right 100  20 10 40 20  100 50)"
+assert_eq "right-100%: sx"  "20"  "$sx"
+
+# right-to-left slide at 50%
+read -r sx sy <<< "$(slide_position right 50  20 10 40 20  100 50)"
+assert_eq "right-50%: sx"   "60"  "$sx"
+
+# bottom-to-top slide at 0%
+read -r sx sy <<< "$(slide_position bottom 0  20 10 40 20  100 50)"
+assert_eq "bottom-0%: sy"   "50"  "$sy"
+
+# bottom-to-top slide at 100%
+read -r sx sy <<< "$(slide_position bottom 100  20 10 40 20  100 50)"
+assert_eq "bottom-100%: sy" "10"  "$sy"
+
+# left-to-right slide at 0% (fully hidden off left edge)
+read -r sx sy <<< "$(slide_position left 0  20 10 40 20  100 50)"
+assert_eq "left-0%: sx"     "-40" "$sx"
+
+# left-to-right slide at 100%
+read -r sx sy <<< "$(slide_position left 100  20 10 40 20  100 50)"
+assert_eq "left-100%: sx"   "20"  "$sx"
+
+# top-to-bottom slide at 0%
+read -r sx sy <<< "$(slide_position top 0  20 10 40 20  100 50)"
+assert_eq "top-0%: sy"      "-20" "$sy"
+
+# top-to-bottom slide at 100%
+read -r sx sy <<< "$(slide_position top 100  20 10 40 20  100 50)"
+assert_eq "top-100%: sy"    "10"  "$sy"
+
+section "Frame params: slide-in visibility progression"
+
+# slide from right at 0%: popup fully off screen
+read -r vx vy vw vh ox oy <<< "$(frame_params right 0  20 10 40 20  100 50)"
+assert_eq "frame-right-0%: vw"  "0"  "$vw"
+
+# slide from right at 25%: partially visible
+read -r vx vy vw vh ox oy <<< "$(frame_params right 25  20 10 40 20  100 50)"
+assert_eq "frame-right-25%: vx" "80" "$vx"
+assert_eq "frame-right-25%: vw" "20" "$vw"
+assert_eq "frame-right-25%: ox" "0"  "$ox"
+
+# slide from right at 100%: fully visible at final position
+read -r vx vy vw vh ox oy <<< "$(frame_params right 100  20 10 40 20  100 50)"
+assert_eq "frame-right-100%: vx" "20" "$vx"
+assert_eq "frame-right-100%: vw" "40" "$vw"
+assert_eq "frame-right-100%: ox" "0"  "$ox"
+
+# slide from left at 0%: popup fully off screen
+read -r vx vy vw vh ox oy <<< "$(frame_params left 0  20 10 40 20  100 50)"
+assert_eq "frame-left-0%: vw"  "0" "$vw"
+
+# slide from left at 50%: sx = -40 + 60*50/100 = -10, so 30 cols visible
+read -r vx vy vw vh ox oy <<< "$(frame_params left 50  20 10 40 20  100 50)"
+assert_eq "frame-left-50%: vx" "0"  "$vx"
+assert_eq "frame-left-50%: vw" "30" "$vw"
+assert_eq "frame-left-50%: ox" "10" "$ox"
+
+# slide from bottom at 0%: off screen
+read -r vx vy vw vh ox oy <<< "$(frame_params bottom 0  20 10 40 20  100 50)"
+assert_eq "frame-bottom-0%: vh" "0"  "$vh"
+
+# slide from bottom at 50%: sy = 50 - 40*50/100 = 30, fully inside container
+read -r vx vy vw vh ox oy <<< "$(frame_params bottom 50  20 10 40 20  100 50)"
+assert_eq "frame-bottom-50%: vy" "30" "$vy"
+assert_eq "frame-bottom-50%: vh" "20" "$vh"
+assert_eq "frame-bottom-50%: oy" "0"  "$oy"
+
+section "Percentage resolution"
+
+assert_eq "pct-80%"     "80"  "$(pg_resolve_pct 80% 100)"
+assert_eq "pct-50%"     "50"  "$(pg_resolve_pct 50% 100)"
+assert_eq "pct-100%"    "200" "$(pg_resolve_pct 100% 200)"
+assert_eq "pct-absolute" "42" "$(pg_resolve_pct 42 999)"
+assert_eq "pct-0%"      "0"   "$(pg_resolve_pct 0% 100)"
+
+section "Easing curves"
+
+# all curves start at 0 and end at 1000
+for curve in linear ease-in ease-out ease-in-out; do
+    assert_eq "$curve-start" "0"    "$(pg_ease 0 "$curve")"
+    assert_eq "$curve-end"   "1000" "$(pg_ease 1000 "$curve")"
+done
+
+# ease-in is slow at start: at t=500, output < 500
+result=$(pg_ease 500 ease-in)
+(( total++ )) || true
+if (( result < 500 )); then
+    (( pass++ )) || true
+    (( verbose )) && printf "  \033[32mpass\033[0m  ease-in-slow-start: %d < 500\n" "$result"
+else
+    (( fail++ )) || true
+    printf "  \033[31mFAIL\033[0m  ease-in-slow-start: %d >= 500\n" "$result"
+fi
+
+# ease-out is fast at start: at t=500, output > 500
+result=$(pg_ease 500 ease-out)
+(( total++ )) || true
+if (( result > 500 )); then
+    (( pass++ )) || true
+    (( verbose )) && printf "  \033[32mpass\033[0m  ease-out-fast-start: %d > 500\n" "$result"
+else
+    (( fail++ )) || true
+    printf "  \033[31mFAIL\033[0m  ease-out-fast-start: %d <= 500\n" "$result"
+fi
+
+# ease-in-out is symmetric around the midpoint
+assert_eq "ease-in-out-mid" "500" "$(pg_ease 500 ease-in-out)"
+
+section "Scaled size"
+
+# none: always full size
+read -r w h <<< "$(pg_scaled_size 500 none 80 40 5 3)"
+assert_eq "scale-none: w" "80" "$w"
+assert_eq "scale-none: h" "40" "$h"
+
+# uniform at 0: minimum size
+read -r w h <<< "$(pg_scaled_size 0 uniform 80 40 5 3)"
+assert_eq "scale-uniform-0: w" "5" "$w"
+assert_eq "scale-uniform-0: h" "3" "$h"
+
+# uniform at 1000: full size
+read -r w h <<< "$(pg_scaled_size 1000 uniform 80 40 5 3)"
+assert_eq "scale-uniform-1000: w" "80" "$w"
+assert_eq "scale-uniform-1000: h" "40" "$h"
+
+# width-first at 500: width fully grown, height at minimum
+read -r w h <<< "$(pg_scaled_size 500 width-first 80 40 5 3)"
+assert_eq "scale-wf-500: w" "80" "$w"
+assert_eq "scale-wf-500: h" "3"  "$h"
+
+# height-first at 500: height fully grown, width at minimum
+read -r w h <<< "$(pg_scaled_size 500 height-first 80 40 5 3)"
+assert_eq "scale-hf-500: w" "5"  "$w"
+assert_eq "scale-hf-500: h" "40" "$h"
+
+section "Frame generation"
+
+# generate 4 frames, uniform scale, origin bottom, 80% x 80% in a 100x50 window
+frame_output=$(pg_generate_frames 4 linear uniform bottom "80%" "80%" "" "" 100 50)
+final_line=$(echo "$frame_output" | tail -1)
+
+# final line should be "#final fx fy aw ah"
+assert_eq "gen-final-tag" "#final" "$(echo "$final_line" | cut -d' ' -f1)"
+
+# resolved 80% of 100 = 80, 80% of 50 = 40
+read -r _ fx fy aw ah <<< "$final_line"
+assert_eq "gen-aw" "80" "$aw"
+assert_eq "gen-ah" "40" "$ah"
+assert_eq "gen-fx" "10" "$fx"   # centered: (100-80)/2
+assert_eq "gen-fy" "45" "$fy"   # centered bottom edge: (50-40)/2 + 40
+
+# should have exactly 4 data lines + 1 final line
+line_count=$(echo "$frame_output" | wc -l)
+assert_eq "gen-line-count" "5" "$line_count"
+
+# first data frame should be at starting position (progress 0)
+first_data=$(echo "$frame_output" | sed -n '1p')
+read -r f_x f_y f_w f_h <<< "$first_data"
+assert_eq "gen-first-frame-progress-0" "3" "$f_h"  # min_h at progress 0
+
+section "Frame params: monotonic visibility"
+
+# as progress increases, visible width must never decrease
+prev_vw=0
+monotonic_ok=1
+for p in $(seq 0 5 100); do
+    read -r _ _ vw _ _ _ <<< "$(frame_params right "$p" 20 10 40 20 100 50)"
+    if (( vw < prev_vw )); then
+        monotonic_ok=0
+        printf "  \033[31mFAIL\033[0m  monotonic-right: vw decreased at %d%% (%d -> %d)\n" \
+            "$p" "$prev_vw" "$vw"
+    fi
+    prev_vw=$vw
+done
+(( total++ ))
+if (( monotonic_ok )); then
+    (( pass++ ))
+    (( verbose )) && printf "  \033[32mpass\033[0m  monotonic-right: visible width never decreases\n"
+else
+    (( fail++ ))
+fi
+
+prev_vh=0
+monotonic_ok=1
+for p in $(seq 0 5 100); do
+    read -r _ _ _ vh _ _ <<< "$(frame_params bottom "$p" 20 10 40 20 100 50)"
+    if (( vh < prev_vh )); then
+        monotonic_ok=0
+        printf "  \033[31mFAIL\033[0m  monotonic-bottom: vh decreased at %d%% (%d -> %d)\n" \
+            "$p" "$prev_vh" "$vh"
+    fi
+    prev_vh=$vh
+done
+(( total++ ))
+if (( monotonic_ok )); then
+    (( pass++ ))
+    (( verbose )) && printf "  \033[32mpass\033[0m  monotonic-bottom: visible height never decreases\n"
+else
+    (( fail++ ))
+fi
+
+# ── summary ────────────────────────────────────────────────────
+
+printf "\n\033[1m%d tests: %d passed, %d failed\033[0m\n" "$total" "$pass" "$fail"
+(( fail == 0 )) || exit 1

@@ -42,7 +42,11 @@ if ! tmux has-session -t "$session" 2>/dev/null; then
     fi
 fi
 
-# restrict keybinds, open popup, restore on close
+# restrict keybinds, open popup with animation, restore on close
+popup_open="$dir/scripts/popup-open"
+anim_args="--origin bottom --scale none --frames 3 --duration 200"
+
 "$popup_keys" open "$table" "$session"
-tmux display-popup -b rounded "$@" -E "$attach_cmd"
+# shellcheck disable=SC2086
+"$popup_open" $anim_args -- -b rounded "$@" -E "$attach_cmd"
 "$popup_keys" close "$session"

@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+#
+# popup-open — open a tmux popup with an intro animation
+#
+# Wraps display-popup with a scale/translate animation. Each frame
+# is a borderless popup filled with the terminal foreground color,
+# then the real popup opens at the final position.
+#
+# Animation flags (before --):
+#   --duration MS    total animation time in milliseconds (default: 150)
+#   --fps N          target frames per second (default: 60)
+#   --frames N       override: set frame count directly (ignores duration/fps)
+#   --easing TYPE    ease-in, ease-out, ease-in-out, linear (default: ease-out)
+#   --scale TYPE     uniform, width-first, height-first, none (default: uniform)
+#   --origin DIR     slide in from: bottom, top, left, right (default: none)
+#   --no-animate     skip animation, open directly
+#
+# Frame timing: each popup open/close cycle costs ~10ms of overhead.
+# The script subtracts this estimate from (1000/fps) to compute a
+# per-frame sleep, so --fps 60 targets ~16ms/frame with ~6ms of sleep.
+# When --frames is given directly, no sleep is added (overhead-limited).
+#
+# Everything after -- is passed verbatim to display-popup.
+#
+# Examples:
+#   popup-open --origin bottom --duration 200 -- -b rounded -w 80% -h 80% -E "$cmd"
+#   popup-open --duration 300 --fps 30 -- -w 40 -h 16 -E "$cmd"
+#   popup-open --frames 12 -- -w 40 -h 16 -E "$cmd"
+
+set -euo pipefail
+
+duration=150
+fps=60
+frames=""
+easing=ease-out
+scale=uniform
+origin=""
+animate=1
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --duration)   duration="$2"; shift 2 ;;
+        --fps)        fps="$2"; shift 2 ;;
+        --frames)     frames="$2"; shift 2 ;;
+        --easing)     easing="$2"; shift 2 ;;
+        --scale)      scale="$2"; shift 2 ;;
+        --origin)     origin="$2"; shift 2 ;;
+        --no-animate) animate=0; shift ;;
+        --)           shift; break ;;
+        *)            break ;;
+    esac
+done
+
+# ── compute frame count and per-frame sleep ─────────────────────
+
+if [[ -n "$frames" ]]; then
+    if (( duration > 0 )); then
+        frame_sleep=pending  # computed after calibration
+        fps=$(( frames * 1000 / duration ))
+        if (( fps < 1 )); then fps=1; fi
+    else
+        frame_sleep=0  # no duration: run at overhead speed
+    fi
+else
+    frames=$(( duration * fps / 1000 ))
+    if (( frames < 1 )); then frames=1; fi
+    frame_sleep=pending  # computed after calibration
+fi
+
+popup_args=("$@")
+
+# ── single-pass: extract geometry + build filtered args ─────────
+target_w="" target_h="" target_x="" target_y=""
+filtered=()
+i=0
+while (( i < ${#popup_args[@]} )); do
+    case "${popup_args[i]}" in
+        -w) target_w="${popup_args[i+1]}"; i=$((i + 2)) ;;
+        -h) target_h="${popup_args[i+1]}"; i=$((i + 2)) ;;
+        -x) target_x="${popup_args[i+1]}"; i=$((i + 2)) ;;
+        -y) target_y="${popup_args[i+1]}"; i=$((i + 2)) ;;
+        *)  filtered+=("${popup_args[i]}"); i=$((i + 1)) ;;
+    esac
+done
+
+# bail early when animation is unnecessary or impossible
+if [[ -z "$target_w" || -z "$target_h" || "$animate" -eq 0 ]]; then
+    exec tmux display-popup "${popup_args[@]}"
+fi
+if [[ "$scale" == "none" && -z "$origin" ]]; then
+    exec tmux display-popup "${popup_args[@]}"
+fi
+
+# ── window dimensions ───────────────────────────────────────────
+win_w=$(tmux display-message -p '#{window_width}')
+win_h=$(tmux display-message -p '#{window_height}')
+
+# ── resolve fg color for animation frames ───────────────────────
+fg=$(tmux display-message -p '#{pane_fg}')
+
+# ── generate frame data ────────────────────────────────────────
+# shellcheck source=popup-geometry
+source "$(dirname "$0")/popup-geometry"
+
+frame_data=$(pg_generate_frames "$frames" "$easing" "$scale" "$origin" \
+    "$target_w" "$target_h" "$target_x" "$target_y" "$win_w" "$win_h")
+
+# extract resolved geometry from last line
+read -r _ final_x final_y abs_w abs_h <<< "${frame_data##*$'\n'}"
+frame_lines="${frame_data%$'\n'*}"
+
+# ── animate (one popup per frame) ───────────────────────────────
+# The first frame calibrates overhead; remaining frames use the
+# measured value to compute sleep.
+frame_cmd="true"
+first=1
+
+while IFS=' ' read -r x y w h; do
+    if (( first )) && [[ "$frame_sleep" == "pending" ]]; then
+        # first frame doubles as calibration — display it and
+        # measure the overhead to compute sleep for the rest
+        t0=$EPOCHREALTIME
+        tmux display-popup -x "$x" -y "$y" -w "$w" -h "$h" \
+            -b none -s "bg=$fg" -E true 2>/dev/null || true
+        t1=$EPOCHREALTIME
+        overhead_ms=$(awk "BEGIN{printf \"%d\", ($t1 - $t0) * 1000}")
+        target_ms=$(( 1000 / fps ))
+        sleep_ms=$(( target_ms - overhead_ms ))
+        if (( sleep_ms < 0 )); then sleep_ms=0; fi
+        frame_sleep=$(awk "BEGIN{printf \"%.4f\", $sleep_ms / 1000}")
+        if [[ "$frame_sleep" != "0" && "$frame_sleep" != "0.0000" ]]; then
+            frame_cmd="sleep $frame_sleep"
+        fi
+        first=0
+    else
+        first=0
+        tmux display-popup -x "$x" -y "$y" -w "$w" -h "$h" \
+            -b none -s "bg=$fg" -E "$frame_cmd" 2>/dev/null || true
+    fi
+done <<< "$frame_lines"
+
+# ── open the real popup ─────────────────────────────────────────
+exec tmux display-popup -x "$final_x" -y "$final_y" \
+    -w "$abs_w" -h "$abs_h" "${filtered[@]}"

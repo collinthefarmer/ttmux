@@ -1,0 +1,282 @@
+#!/usr/bin/env bash
+#
+# popup-geometry — rectangle clipping and animation math for popups
+#
+# Provides pure-bash functions for computing popup frame geometry:
+# AABB intersection, easing curves, slide positioning, and full
+# frame generation. No tmux dependency — source this from scripts
+# that need the math.
+#
+# Usage:
+#   source popup-geometry
+#
+# Functions:
+#   pg_resolve_pct VAL TOTAL   — resolve "80%" to absolute cells
+#   pg_ease T EASING           — apply easing curve to progress [0..1000]
+#   pg_aabb_intersect ...      — visible region of two overlapping rects
+#   pg_slide_position ...      — popup coords at a given animation progress
+#   pg_frame_params ...        — compose slide + clip for one frame
+#   pg_generate_frames ...     — emit all frames for an animation sequence
+
+# ── percentage resolution ──────────────────────────────────────
+
+# pg_resolve_pct VAL TOTAL
+# If VAL ends with %, resolve against TOTAL. Otherwise return VAL.
+# Prints the resolved integer.
+pg_resolve_pct() {
+    local val=$1 total=$2
+    if [[ "$val" == *% ]]; then
+        local pct=${val%\%}
+        echo $(( total * pct / 100 ))
+    else
+        echo $(( val + 0 ))
+    fi
+}
+
+# ── easing ─────────────────────────────────────────────────────
+
+# pg_ease PROGRESS_MILLI EASING
+# PROGRESS_MILLI: 0–1000 (integer-scaled progress, 1000 = complete)
+# EASING: linear, ease-in, ease-out, ease-in-out
+# Prints eased progress as 0–1000.
+pg_ease() {
+    local t=$1 easing=$2
+    case "$easing" in
+        linear)
+            echo "$t"
+            ;;
+        ease-in)
+            # t^2: (t/1000)^2 * 1000 = t*t/1000
+            echo $(( t * t / 1000 ))
+            ;;
+        ease-out)
+            # 1-(1-t)^2: 1000 - (1000-t)^2/1000
+            local inv=$(( 1000 - t ))
+            echo $(( 1000 - inv * inv / 1000 ))
+            ;;
+        ease-in-out)
+            if (( t < 500 )); then
+                # 2t^2: 2*t*t/1000
+                echo $(( 2 * t * t / 1000 ))
+            else
+                local inv=$(( 1000 - t ))
+                echo $(( 1000 - 2 * inv * inv / 1000 ))
+            fi
+            ;;
+        *)
+            echo "$t"
+            ;;
+    esac
+}
+
+# ── AABB intersection ──────────────────────────────────────────
+
+# pg_aabb_intersect CX CY CW CH SX SY SW SH
+# Computes the visible region where container and popup overlap.
+# Prints: visible_x visible_y visible_w visible_h offset_x offset_y
+pg_aabb_intersect() {
+    local cx=$1 cy=$2 cw=$3 ch=$4
+    local sx=$5 sy=$6 sw=$7 sh=$8
+    local x1 y1 x2 y2 vw vh ox oy
+
+    (( x1 = cx > sx ? cx : sx )) || true
+    (( y1 = cy > sy ? cy : sy )) || true
+    (( x2 = cx + cw < sx + sw ? cx + cw : sx + sw )) || true
+    (( y2 = cy + ch < sy + sh ? cy + ch : sy + sh )) || true
+
+    (( vw = x2 - x1 > 0 ? x2 - x1 : 0 )) || true
+    (( vh = y2 - y1 > 0 ? y2 - y1 : 0 )) || true
+
+    (( ox = x1 - sx )) || true
+    (( oy = y1 - sy )) || true
+    if (( vw == 0 )); then ox=0; fi
+    if (( vh == 0 )); then oy=0; fi
+
+    echo "$x1 $y1 $vw $vh $ox $oy"
+}
+
+# ── slide position ─────────────────────────────────────────────
+
+# pg_slide_position ORIGIN PROGRESS FINAL_X FINAL_Y PW PH WIN_W WIN_H
+# PROGRESS: 0 = fully hidden off-edge, 100 = fully arrived
+# Prints: popup_x popup_y
+pg_slide_position() {
+    local origin=$1 progress=$2
+    local final_x=$3 final_y=$4 pw=$5 ph=$6
+    local win_w=$7 win_h=$8
+    local sx sy
+
+    case "$origin" in
+        right)
+            (( sx = win_w - (win_w - final_x) * progress / 100 )) || true
+            sy=$final_y
+            ;;
+        left)
+            (( sx = -pw + (pw + final_x) * progress / 100 )) || true
+            sy=$final_y
+            ;;
+        bottom)
+            sx=$final_x
+            (( sy = win_h - (win_h - final_y) * progress / 100 )) || true
+            ;;
+        top)
+            sx=$final_x
+            (( sy = -ph + (ph + final_y) * progress / 100 )) || true
+            ;;
+        *)
+            sx=$final_x
+            sy=$final_y
+            ;;
+    esac
+
+    echo "$sx $sy"
+}
+
+# ── scaled dimensions at progress ──────────────────────────────
+
+# pg_scaled_size PROGRESS_MILLI SCALE AW AH MIN_W MIN_H
+# PROGRESS_MILLI: eased progress 0–1000
+# SCALE: uniform, width-first, height-first, none
+# Prints: w h
+pg_scaled_size() {
+    local e=$1 sc=$2 aw=$3 ah=$4 min_w=$5 min_h=$6
+    local w h pw ph
+
+    case "$sc" in
+        none)
+            w=$aw; h=$ah
+            ;;
+        uniform)
+            (( w = min_w + (aw - min_w) * e / 1000 )) || true
+            (( h = min_h + (ah - min_h) * e / 1000 )) || true
+            ;;
+        width-first)
+            (( pw = e * 2 )) || true
+            if (( pw > 1000 )); then pw=1000; fi
+            (( ph = e * 2 - 1000 )) || true
+            if (( ph < 0 )); then ph=0; fi
+            (( w = min_w + (aw - min_w) * pw / 1000 )) || true
+            (( h = min_h + (ah - min_h) * ph / 1000 )) || true
+            ;;
+        height-first)
+            (( ph = e * 2 )) || true
+            if (( ph > 1000 )); then ph=1000; fi
+            (( pw = e * 2 - 1000 )) || true
+            if (( pw < 0 )); then pw=0; fi
+            (( w = min_w + (aw - min_w) * pw / 1000 )) || true
+            (( h = min_h + (ah - min_h) * ph / 1000 )) || true
+            ;;
+        *)
+            w=$aw; h=$ah
+            ;;
+    esac
+
+    if (( w < min_w )); then w=$min_w; fi
+    if (( h < min_h )); then h=$min_h; fi
+
+    echo "$w $h"
+}
+
+# ── single frame parameters ───────────────────────────────────
+
+# pg_frame_params ORIGIN PROGRESS FINAL_X FINAL_Y PW PH WIN_W WIN_H
+# Convenience: computes slide position then clips against window.
+# Prints: visible_x visible_y visible_w visible_h offset_x offset_y
+pg_frame_params() {
+    local origin=$1 progress=$2
+    local final_x=$3 final_y=$4 pw=$5 ph=$6
+    local win_w=$7 win_h=$8
+
+    local pos sx sy
+    pos=$(pg_slide_position "$origin" "$progress" "$final_x" "$final_y" \
+        "$pw" "$ph" "$win_w" "$win_h")
+    read -r sx sy <<< "$pos"
+
+    pg_aabb_intersect 0 0 "$win_w" "$win_h" "$sx" "$sy" "$pw" "$ph"
+}
+
+# ── full frame generation ──────────────────────────────────────
+
+# pg_generate_frames N EASING SCALE ORIGIN TW TH TX TY WIN_W WIN_H
+# Emits one "x y w h" line per frame, then a "#final fx fy aw ah" line.
+# This replaces the monolithic awk block in popup-open.
+pg_generate_frames() {
+    local n=$1 easing=$2 sc=$3 origin=$4
+    local tw=$5 th=$6 tx=$7 ty=$8
+    local win_w=$9 win_h=${10}
+
+    local aw ah fx fy fy_top
+    aw=$(pg_resolve_pct "$tw" "$win_w")
+    ah=$(pg_resolve_pct "$th" "$win_h")
+    if (( aw < 3 )); then aw=3; fi
+    if (( ah < 1 )); then ah=1; fi
+
+    if [[ -n "$tx" ]]; then
+        fx=$(pg_resolve_pct "$tx" "$win_w")
+    else
+        (( fx = (win_w - aw) / 2 )) || true
+    fi
+    # tmux coordinate system:
+    #   -x = left edge of popup (0 = left of terminal)
+    #   -y = BOTTOM edge of popup (0 = top of terminal)
+    # So final y (bottom edge) = top + height.
+    # Default position is centered: top = (win_h - ah) / 2, bottom = top + ah.
+    if [[ -n "$ty" ]]; then
+        fy_top=$(pg_resolve_pct "$ty" "$win_h")
+    else
+        (( fy_top = (win_h - ah) / 2 )) || true
+    fi
+    (( fy = fy_top + ah )) || true
+
+    local min_w=5 min_h=3
+    local f e_milli e_raw w h x y
+
+    for (( f = 0; f < n; f++ )); do
+        # integer-scaled progress: 0/n...(n-1)/n * 1000
+        (( e_raw = f * 1000 / n )) || true
+        e_milli=$(pg_ease "$e_raw" "$easing")
+
+        read -r w h <<< "$(pg_scaled_size "$e_milli" "$sc" "$aw" "$ah" "$min_w" "$min_h")"
+
+        # Compute position. tmux -y is the bottom edge, so we work in
+        # bottom-edge coordinates throughout, then emit them directly.
+        #
+        # For edge origins, the popup starts flush against that edge
+        # and translates to its final position. tmux clamping is not
+        # an issue because we never go off-screen — we just slide
+        # within the valid range.
+        case "$origin" in
+            bottom)
+                (( x = fx + (aw - w) / 2 )) || true
+                # bottom edge: start at win_h, arrive at fy
+                (( y = win_h + (fy - win_h) * e_milli / 1000 )) || true
+                ;;
+            top)
+                (( x = fx + (aw - w) / 2 )) || true
+                # bottom edge of popup when flush to top = h (top=0, bottom=h)
+                # interpolate from h to fy
+                (( y = h + (fy - h) * e_milli / 1000 )) || true
+                ;;
+            left)
+                (( y = fy_top + (ah + h) / 2 )) || true
+                # left edge: start at 0, arrive at fx
+                (( x = fx * e_milli / 1000 )) || true
+                ;;
+            right)
+                (( y = fy_top + (ah + h) / 2 )) || true
+                # left edge: start at win_w - w (flush right), arrive at fx
+                (( ox = win_w - w )) || true
+                (( x = ox + (fx - ox) * e_milli / 1000 )) || true
+                ;;
+            *)
+                # no origin: center-adjust for scaling only
+                (( x = fx + (aw - w) / 2 )) || true
+                (( y = fy_top + (ah + h) / 2 )) || true
+                ;;
+        esac
+
+        printf "%d %d %d %d\n" "$x" "$y" "$w" "$h"
+    done
+
+    printf "#final %d %d %d %d\n" "$fx" "$fy" "$aw" "$ah"
+}
