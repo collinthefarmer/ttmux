@@ -111,12 +111,12 @@ while true; do
     if (( first_open )); then
         # shellcheck disable=SC2086
         "$popup_open" $anim_args -- -b rounded \
-            -w "$cur_w" -h "$cur_h" "${filtered_args[@]}" -E "$attach_cmd"
+            -w "$cur_w" -h "$cur_h" ${filtered_args[@]+"${filtered_args[@]}"} -E "$attach_cmd"
         first_open=0
     else
         # after a resize animation, open directly — no intro animation
         "$popup_open" --no-animate -- -b rounded \
-            -w "$cur_w" -h "$cur_h" "${filtered_args[@]}" -E "$attach_cmd"
+            -w "$cur_w" -h "$cur_h" ${filtered_args[@]+"${filtered_args[@]}"} -E "$attach_cmd"
     fi
     "$popup_keys" close "$session"
 
