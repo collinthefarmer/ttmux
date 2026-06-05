@@ -58,9 +58,9 @@ ansi_bg=""
 if [[ "$fg" == \#* ]]; then
     # #rrggbb → \033[48;2;R;G;Bm
     hex="${fg#\#}"
-    r=$(( 16#${hex:0:2} ))
-    g=$(( 16#${hex:2:2} ))
-    b=$(( 16#${hex:4:2} ))
+    r=$(printf "%d" "0x${hex:0:2}")
+    g=$(printf "%d" "0x${hex:2:2}")
+    b=$(printf "%d" "0x${hex:4:2}")
     ansi_bg="\\033[48;2;${r};${g};${b}m"
 elif [[ "$fg" == colour* ]]; then
     # colour0-colour255 → \033[48;5;Nm

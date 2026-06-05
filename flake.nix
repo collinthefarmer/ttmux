@@ -87,6 +87,9 @@
             wrapProgram $out/share/ttmux/scripts/agent-popup \
               --prefix PATH : ${coreTools}
 
+            wrapProgram $out/share/ttmux/scripts/popup-resize \
+              --prefix PATH : ${coreTools}
+
             wrapProgram $out/share/ttmux/scripts/fzf-dispatch \
               --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.coreutils pkgs.fzf ]}
 
