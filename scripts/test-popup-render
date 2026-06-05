@@ -1,0 +1,456 @@
+#!/usr/bin/env bash
+#
+# test-popup-render — tests for tmux popup rendering behavior
+#
+# Opens real tmux popups and inspects their internal state to verify
+# dimensions, styling, and fill behavior. Requires a running tmux
+# session (will refuse to run outside tmux).
+#
+# Strategy: standalone popups (-E command) can't have their pane
+# captured, since tmux doesn't expose the popup pane ID. For fill
+# and style tests, we attach a temporary session inside the popup
+# and capture that session's pane from outside.
+#
+# Usage:
+#   test-popup-render [--verbose]
+
+set -euo pipefail
+
+if [[ -z "${TMUX:-}" ]]; then
+    echo "test-popup-render: must run inside tmux" >&2
+    exit 1
+fi
+
+verbose=0
+[[ "${1:-}" == "--verbose" ]] && verbose=1
+
+pass=0
+fail=0
+total=0
+
+# ── test harness ───────────────────────────────────────────────
+
+assert_eq() {
+    local label="$1" expected="$2" actual="$3"
+    (( total++ )) || true
+    if [[ "$expected" == "$actual" ]]; then
+        (( pass++ )) || true
+        (( verbose )) && printf "  \033[32mpass\033[0m  %s\n" "$label" || true
+    else
+        (( fail++ )) || true
+        printf "  \033[31mFAIL\033[0m  %s: expected '%s', got '%s'\n" \
+            "$label" "$expected" "$actual"
+    fi
+}
+
+assert_ge() {
+    local label="$1" threshold="$2" actual="$3"
+    (( total++ )) || true
+    if (( actual >= threshold )); then
+        (( pass++ )) || true
+        (( verbose )) && printf "  \033[32mpass\033[0m  %s: %d >= %d\n" "$label" "$actual" "$threshold" || true
+    else
+        (( fail++ )) || true
+        printf "  \033[31mFAIL\033[0m  %s: %d < %d\n" \
+            "$label" "$actual" "$threshold"
+    fi
+}
+
+section() {
+    printf "\n\033[1m── %s ──\033[0m\n" "$1"
+}
+
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"; tmux kill-session -t _tpr 2>/dev/null || true' EXIT
+
+# source geometry library for animation math
+# shellcheck source=popup-geometry
+source "$(dirname "$0")/popup-geometry"
+
+# ── helpers ────────────────────────────────────────────────────
+
+# popup_tty_size POPUP_ARGS...
+# Opens a standalone popup and queries PTY dimensions via stty.
+# Prints "WIDTHxHEIGHT".
+popup_tty_size() {
+    local out="$tmpdir/tty.$$.$RANDOM"
+    tmux display-popup "$@" \
+        -E "stty size > '$out'" 2>/dev/null
+    local rows cols
+    read -r rows cols < "$out" 2>/dev/null || { echo ""; rm -f "$out"; return; }
+    rm -f "$out"
+    echo "${cols}x${rows}"
+}
+
+# popup_session_open [-w W] [-h H] [-b border] [-s style] [other popup args]
+# Opens a popup attached to the _tpr session. Kills any prior _tpr
+# session first. Backgrounds the popup process.
+# Sets POPUP_PID to the backgrounded process ID.
+POPUP_PID=""
+popup_session_open() {
+    local sess="_tpr"
+    tmux kill-session -t "$sess" 2>/dev/null || true
+    tmux new-session -d -s "$sess"
+
+    tmux display-popup "$@" \
+        -E "tmux attach -t '$sess'" &
+    POPUP_PID=$!
+    sleep 0.3
+}
+
+# popup_fill_open -w W -h H [-x X] [-y Y] -s "bg=COLOR" COLOR_HEX
+# Opens a popup with a session running a raw fill command (no shell).
+# The session command sets the terminal bg to COLOR_HEX (R;G;B format)
+# and clears, so capture-pane -e will show the bg escape on every line.
+# The popup stays open until popup_fill_close is called.
+popup_fill_open() {
+    local popup_args=()
+    while [[ $# -gt 1 ]]; do
+        popup_args+=("$1"); shift
+    done
+    local rgb="$1"  # R;G;B format for ANSI 48;2 escape
+
+    local sess="_tpr"
+    tmux kill-session -t "$sess" 2>/dev/null || true
+
+    # session runs a fill command, not a shell — so capture-pane
+    # sees the bg color on every cell rather than prompt colors
+    tmux new-session -d -s "$sess" \
+        "printf '\033[48;2;${rgb}m'; clear; sleep 30"
+
+    tmux display-popup "${popup_args[@]}" \
+        -E "tmux attach -t '$sess'" &
+    POPUP_PID=$!
+    sleep 0.3
+}
+
+# popup_fill_check EXPECTED_RGB LABEL
+# Captures the _tpr session pane and asserts that every line
+# contains the expected background color escape (48;2;R;G;B).
+popup_fill_check() {
+    local rgb="$1" label="$2"
+    local capture
+    capture=$(tmux capture-pane -t "_tpr" -e -p 2>/dev/null)
+    local total_lines styled_lines
+    total_lines=$(echo "$capture" | wc -l)
+    styled_lines=$(echo "$capture" | grep -c "48;2;${rgb}" 2>/dev/null) || styled_lines=0
+    assert_eq "$label" "$total_lines" "$styled_lines"
+}
+
+# hex_to_rgb HEX — convert #rrggbb to R;G;B
+hex_to_rgb() {
+    local hex="${1#\#}"
+    printf "%d;%d;%d" "0x${hex:0:2}" "0x${hex:2:2}" "0x${hex:4:2}"
+}
+
+# popup_session_query FORMAT
+# Queries a tmux format string against the _tpr session pane.
+popup_session_query() {
+    tmux display-message -t "_tpr" -p "$1" 2>/dev/null || echo ""
+}
+
+# popup_session_capture [SETUP_CMD]
+# Optionally runs SETUP_CMD in the _tpr session, then captures
+# the pane content with escape sequences.
+popup_session_capture() {
+    local setup_cmd="${1:-}"
+    if [[ -n "$setup_cmd" ]]; then
+        tmux send-keys -t "_tpr" "$setup_cmd" Enter
+        sleep 0.1
+    fi
+    tmux capture-pane -t "_tpr" -e -p 2>/dev/null
+}
+
+# popup_session_close
+# Tears down the _tpr session and waits for the popup process.
+popup_session_close() {
+    tmux kill-session -t "_tpr" 2>/dev/null || true
+    if [[ -n "$POPUP_PID" ]]; then
+        wait "$POPUP_PID" 2>/dev/null || true
+        POPUP_PID=""
+    fi
+}
+
+
+# ════════════════════════════════════════════════════════════════
+# Tests
+# ════════════════════════════════════════════════════════════════
+
+win_w=$(tmux display-message -p '#{window_width}')
+win_h=$(tmux display-message -p '#{window_height}')
+
+# ── static dimension tests ─────────────────────────────────────
+
+section "Popup pane dimensions: standalone (-E)"
+
+for w in 20 40; do
+    h=$(( w / 2 ))
+    result=$(popup_tty_size -w "$w" -h "$h" -b none)
+    assert_eq "standalone-${w}x${h}" "${w}x${h}" "$result"
+done
+
+section "Popup pane dimensions: bordered"
+
+for w in 20 40; do
+    h=$(( w / 2 ))
+    expect_pw=$(( w - 2 ))
+    expect_ph=$(( h - 2 ))
+    result=$(popup_tty_size -w "$w" -h "$h" -b rounded)
+    assert_eq "bordered-${w}x${h}" "${expect_pw}x${expect_ph}" "$result"
+done
+
+section "Popup pane dimensions: sequential sizes"
+
+popup_tty_size -w 20 -h 10 -b none > /dev/null
+result=$(popup_tty_size -w 60 -h 30 -b none)
+assert_eq "seq-20-to-60" "60x30" "$result"
+
+popup_tty_size -w 60 -h 30 -b none > /dev/null
+result=$(popup_tty_size -w 30 -h 15 -b none)
+assert_eq "seq-60-to-30" "30x15" "$result"
+
+# ── static session tests ───────────────────────────────────────
+
+section "Popup session dimensions"
+
+popup_session_open -w 40 -h 20 -b none
+result=$(popup_session_query '#{pane_width}x#{pane_height}')
+# session status bar takes 1 row
+assert_eq "session-40x20" "40x19" "$result"
+popup_session_close
+
+popup_session_open -w 60 -h 25 -b none
+result=$(popup_session_query '#{pane_width}x#{pane_height}')
+assert_eq "session-60x25" "60x24" "$result"
+popup_session_close
+
+# ── static fill tests ──────────────────────────────────────────
+
+section "Style fill: -s bg= (session capture)"
+
+popup_session_open -w 30 -h 10 -b none -s "bg=red"
+capture=$(popup_session_capture)
+popup_session_close
+line_count=$(echo "$capture" | wc -l)
+styled_count=$(echo "$capture" | grep -c $'\033' 2>/dev/null) || styled_count=0
+assert_eq "bg-fill-styled" "$line_count" "$styled_count"
+
+section "Style fill: -s bg= with clear"
+
+popup_session_open -w 30 -h 10 -b none -s "bg=red"
+capture=$(popup_session_capture "clear")
+popup_session_close
+line_count=$(echo "$capture" | wc -l)
+styled_count=$(echo "$capture" | grep -c $'\033' 2>/dev/null) || styled_count=0
+assert_eq "bg-clear-styled" "$line_count" "$styled_count"
+
+section "Style fill: ANSI escape bg + clear"
+
+popup_session_open -w 30 -h 10 -b none
+capture=$(popup_session_capture "printf '\\033[41m'; clear")
+popup_session_close
+line_count=$(echo "$capture" | wc -l)
+styled_count=$(echo "$capture" | grep -c $'\033' 2>/dev/null) || styled_count=0
+assert_eq "ansi-clear-styled" "$line_count" "$styled_count"
+
+# ── animated expand sequence ───────────────────────────────────
+
+section "Animation: expand dimensions (standalone)"
+
+# Simulate popup-resize expanding from 30x15 to 60x30
+anim_old_w=30 anim_old_h=15
+anim_new_w=60 anim_new_h=30
+anim_frames=4
+
+for (( f = 1; f <= anim_frames; f++ )); do
+    (( progress = f * 1000 / anim_frames )) || true
+    eased=$(pg_ease "$progress" ease-in-out)
+    (( w = anim_old_w + (anim_new_w - anim_old_w) * eased / 1000 )) || true
+    (( h = anim_old_h + (anim_new_h - anim_old_h) * eased / 1000 )) || true
+    if (( w < 3 )); then w=3; fi
+    if (( h < 1 )); then h=1; fi
+
+    result=$(popup_tty_size -w "$w" -h "$h" -b none)
+    assert_eq "expand-f${f}-size" "${w}x${h}" "$result"
+done
+
+section "Animation: expand dimensions (rapid sequence)"
+
+# Open and close popups at each frame size in quick succession,
+# then verify the final size is correct (not cached from earlier frame)
+for (( f = 1; f <= anim_frames; f++ )); do
+    (( progress = f * 1000 / anim_frames )) || true
+    eased=$(pg_ease "$progress" ease-in-out)
+    (( w = anim_old_w + (anim_new_w - anim_old_w) * eased / 1000 )) || true
+    (( h = anim_old_h + (anim_new_h - anim_old_h) * eased / 1000 )) || true
+    if (( w < 3 )); then w=3; fi
+    if (( h < 1 )); then h=1; fi
+
+    # open and close rapidly (like popup-resize does)
+    tmux display-popup -w "$w" -h "$h" -b none -E true 2>/dev/null || true
+done
+
+# verify the final popup gets the right size, not a stale one
+result=$(popup_tty_size -w "$anim_new_w" -h "$anim_new_h" -b none)
+assert_eq "rapid-final-size" "${anim_new_w}x${anim_new_h}" "$result"
+
+section "Animation: expand fill (session per frame)"
+
+# For each frame in the expand sequence, open a session-based popup
+# and verify the fill covers the full pane
+for (( f = 1; f <= anim_frames; f++ )); do
+    (( progress = f * 1000 / anim_frames )) || true
+    eased=$(pg_ease "$progress" ease-in-out)
+    (( w = anim_old_w + (anim_new_w - anim_old_w) * eased / 1000 )) || true
+    (( h = anim_old_h + (anim_new_h - anim_old_h) * eased / 1000 )) || true
+    if (( w < 3 )); then w=3; fi
+    if (( h < 1 )); then h=1; fi
+
+    popup_session_open -w "$w" -h "$h" -b none -s "bg=red"
+    capture=$(popup_session_capture "clear")
+    popup_session_close
+
+    line_count=$(echo "$capture" | wc -l)
+    styled_count=$(echo "$capture" | grep -c $'\033' 2>/dev/null) || styled_count=0
+    assert_eq "expand-f${f}-fill" "$line_count" "$styled_count"
+done
+
+section "Animation: shrink dimensions (standalone)"
+
+# Simulate popup-resize shrinking from 60x30 to 30x15
+for (( f = 1; f <= anim_frames; f++ )); do
+    (( progress = f * 1000 / anim_frames )) || true
+    eased=$(pg_ease "$progress" ease-in-out)
+    (( w = anim_new_w + (anim_old_w - anim_new_w) * eased / 1000 )) || true
+    (( h = anim_new_h + (anim_old_h - anim_new_h) * eased / 1000 )) || true
+    if (( w < 3 )); then w=3; fi
+    if (( h < 1 )); then h=1; fi
+
+    result=$(popup_tty_size -w "$w" -h "$h" -b none)
+    assert_eq "shrink-f${f}-size" "${w}x${h}" "$result"
+done
+
+section "Animation: rapid expand then verify fill"
+
+# Run the full rapid open/close cycle like popup-resize does,
+# then open a session popup at the final size and check fill
+for (( f = 1; f <= anim_frames; f++ )); do
+    (( progress = f * 1000 / anim_frames )) || true
+    eased=$(pg_ease "$progress" ease-in-out)
+    (( w = anim_old_w + (anim_new_w - anim_old_w) * eased / 1000 )) || true
+    (( h = anim_old_h + (anim_new_h - anim_old_h) * eased / 1000 )) || true
+    if (( w < 3 )); then w=3; fi
+    if (( h < 1 )); then h=1; fi
+
+    # replicate popup-resize: -s bg=, -b none, -E clear
+    tmux display-popup -w "$w" -h "$h" -b none -s "bg=red" \
+        -E clear 2>/dev/null || true
+done
+
+# now open a session popup at final size and verify fill
+popup_session_open -w "$anim_new_w" -h "$anim_new_h" -b none -s "bg=red"
+capture=$(popup_session_capture "clear")
+popup_session_close
+
+line_count=$(echo "$capture" | wc -l)
+styled_count=$(echo "$capture" | grep -c $'\033' 2>/dev/null) || styled_count=0
+assert_eq "post-rapid-fill" "$line_count" "$styled_count"
+
+# verify dimensions weren't corrupted by the rapid cycle
+popup_session_open -w "$anim_new_w" -h "$anim_new_h" -b none
+result=$(popup_session_query '#{pane_width}x#{pane_height}')
+popup_session_close
+# session status bar: -1 on height
+expect_h=$(( anim_new_h - 1 ))
+assert_eq "post-rapid-dims" "${anim_new_w}x${expect_h}" "$result"
+
+
+section "Animation: standalone fill (popup-resize approach)"
+
+# This replicates exactly what popup-resize does: standalone popup
+# with -E clear (no session). We can only check dimensions, not
+# fill, since standalone popups can't be captured. But we verify
+# the clear command actually runs by checking the popup doesn't
+# error and the dimensions are correct.
+for (( f = 1; f <= anim_frames; f++ )); do
+    (( progress = f * 1000 / anim_frames )) || true
+    eased=$(pg_ease "$progress" ease-in-out)
+    (( w = anim_old_w + (anim_new_w - anim_old_w) * eased / 1000 )) || true
+    (( h = anim_old_h + (anim_new_h - anim_old_h) * eased / 1000 )) || true
+    if (( w < 3 )); then w=3; fi
+    if (( h < 1 )); then h=1; fi
+
+    (( x = (win_w - w) / 2 )) || true
+    (( y = (win_h - h) / 2 )) || true
+
+    # exactly what popup-resize does: positioned, borderless, styled, -E clear
+    local_out="$tmpdir/standalone-f${f}.txt"
+    tmux display-popup -x "$x" -y "$y" -w "$w" -h "$h" \
+        -b none -s "bg=red" -E "stty size > '$local_out'; clear" 2>/dev/null || true
+
+    if [[ -f "$local_out" ]]; then
+        read -r rows cols < "$local_out" 2>/dev/null || { rows=0; cols=0; }
+        assert_eq "standalone-expand-f${f}" "${w}x${h}" "${cols}x${rows}"
+    else
+        (( total++ )); (( fail++ ))
+        printf "  \033[31mFAIL\033[0m  standalone-expand-f${f}: no output file\n"
+    fi
+done
+
+section "Animation fill: session-based color assertion"
+
+# Simulate popup-resize's expand sequence, but use session-based
+# popups with a raw fill command. Capture each frame mid-display
+# and assert that every line has the expected bg color.
+test_fg="#cdd6f4"
+test_rgb=$(hex_to_rgb "$test_fg")
+
+for (( f = 1; f <= anim_frames; f++ )); do
+    (( progress = f * 1000 / anim_frames )) || true
+    eased=$(pg_ease "$progress" ease-in-out)
+    (( w = anim_old_w + (anim_new_w - anim_old_w) * eased / 1000 )) || true
+    (( h = anim_old_h + (anim_new_h - anim_old_h) * eased / 1000 )) || true
+    if (( w < 3 )); then w=3; fi
+    if (( h < 1 )); then h=1; fi
+
+    (( x = (win_w - w) / 2 )) || true
+    (( y = (win_h - h) / 2 )) || true
+
+    popup_fill_open -w "$w" -h "$h" -x "$x" -y "$y" -b none "$test_rgb"
+    popup_fill_check "$test_rgb" "anim-fill-f${f}-${w}x${h}"
+    popup_session_close
+done
+
+section "Style mechanism: -s bg= vs ANSI escape"
+
+# Proves that -s "bg=..." does NOT fill the pane — only ANSI escapes do.
+
+# Test A: -s style alone (should NOT produce bg in capture)
+sess_a="_tpr"
+tmux kill-session -t "$sess_a" 2>/dev/null || true
+tmux new-session -d -s "$sess_a" -x 20 -y 5 "clear; sleep 10"
+tmux display-popup -w 20 -h 5 -b none -s "bg=#cdd6f4" \
+    -E "tmux attach -t '$sess_a'" &
+local_pid=$!; sleep 0.3
+capture_a=$(tmux capture-pane -t "$sess_a" -e -p 2>/dev/null)
+tmux kill-session -t "$sess_a" 2>/dev/null; wait "$local_pid" 2>/dev/null || true
+styled_a=$(echo "$capture_a" | grep -c "48;2" 2>/dev/null) || styled_a=0
+assert_eq "s-style-no-ansi-bg" "0" "$styled_a"
+
+# Test B: ANSI escape (SHOULD produce bg in capture)
+tmux kill-session -t "$sess_a" 2>/dev/null || true
+tmux new-session -d -s "$sess_a" -x 20 -y 5 \
+    "printf '\033[48;2;${test_rgb}m'; clear; sleep 10"
+tmux display-popup -w 20 -h 5 -b none \
+    -E "tmux attach -t '$sess_a'" &
+local_pid=$!; sleep 0.3
+capture_b=$(tmux capture-pane -t "$sess_a" -e -p 2>/dev/null)
+tmux kill-session -t "$sess_a" 2>/dev/null; wait "$local_pid" 2>/dev/null || true
+styled_b=$(echo "$capture_b" | grep -c "48;2;${test_rgb}" 2>/dev/null) || styled_b=0
+total_b=$(echo "$capture_b" | wc -l)
+assert_eq "ansi-escape-has-bg" "$total_b" "$styled_b"
+
+# ── summary ────────────────────────────────────────────────────
+
+printf "\n\033[1m%d tests: %d passed, %d failed\033[0m\n" "$total" "$pass" "$fail"
+(( fail == 0 )) || exit 1

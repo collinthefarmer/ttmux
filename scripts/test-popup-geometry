@@ -342,6 +342,177 @@ else
     (( fail++ ))
 fi
 
+section "Centering: window_height vs client_height divergence"
+
+# tmux -y C centers on client_height (includes status bar), not
+# window_height (excludes it). Manual centering with window_height
+# drifts by ~1 row. But #{client_height} can resolve against the
+# wrong client in multi-client sessions, so popup-resize uses
+# -x C -y C and leaves centering to tmux.
+test_client_h=54
+test_win_h=53  # client_h minus 1 status bar row
+mismatch_count=0
+for test_h in 10 20 30 40; do
+    c_y=$(( (test_client_h - test_h) / 2 ))
+    w_y=$(( (test_win_h - test_h) / 2 ))
+    if (( c_y != w_y )); then
+        (( mismatch_count++ )) || true
+    fi
+done
+(( total++ )) || true
+if (( mismatch_count > 0 )); then
+    (( pass++ )) || true
+    (( verbose )) && printf "  \033[32mpass\033[0m  client-vs-window: %d/4 sizes diverge (use -x C -y C)\n" "$mismatch_count"
+else
+    (( fail++ )) || true
+    printf "  \033[31mFAIL\033[0m  client-vs-window: expected centering mismatch from status bar\n"
+fi
+
+section "Resize interpolation: center-scaling invariant"
+
+# Replicate popup-resize's frame math and verify that every frame
+# stays centered in the window. The invariant: for any frame,
+#   x + w/2 == win_w/2   and   y + h/2 == win_h/2
+# This ensures the popup appears to scale from its center.
+
+win_w=200 win_h=100
+old_w=100 old_h=50    # 50% x 50%
+new_w=190 new_h=90    # 95% x 90%
+resize_frames=8
+expect_cx=$(( win_w / 2 ))
+expect_cy=$(( win_h / 2 ))
+
+center_ok=1
+for (( f = 1; f <= resize_frames; f++ )); do
+    (( progress = f * 1000 / resize_frames )) || true
+    eased=$(pg_ease "$progress" linear)
+
+    (( w = old_w + (new_w - old_w) * eased / 1000 )) || true
+    (( h = old_h + (new_h - old_h) * eased / 1000 )) || true
+    if (( w < 3 )); then w=3; fi
+    if (( h < 1 )); then h=1; fi
+
+    (( x = (win_w - w) / 2 )) || true
+    (( y = (win_h - h) / 2 )) || true
+
+    # center of the frame
+    (( cx = x + w / 2 )) || true
+    (( cy = y + h / 2 )) || true
+
+    # allow ±1 cell tolerance for integer rounding
+    if (( cx < expect_cx - 1 || cx > expect_cx + 1 )); then
+        center_ok=0
+        printf "  \033[31mFAIL\033[0m  resize-center-x: frame %d cx=%d, expected %d (w=%d x=%d)\n" \
+            "$f" "$cx" "$expect_cx" "$w" "$x"
+    fi
+    if (( cy < expect_cy - 1 || cy > expect_cy + 1 )); then
+        center_ok=0
+        printf "  \033[31mFAIL\033[0m  resize-center-y: frame %d cy=%d, expected %d (h=%d y=%d)\n" \
+            "$f" "$cy" "$expect_cy" "$h" "$y"
+    fi
+done
+(( total++ ))
+if (( center_ok )); then
+    (( pass++ ))
+    (( verbose )) && printf "  \033[32mpass\033[0m  resize-center: all frames centered (linear)\n"
+else
+    (( fail++ ))
+fi
+
+# same test with ease-in-out (the actual easing used by popup-resize)
+center_ok=1
+for (( f = 1; f <= resize_frames; f++ )); do
+    (( progress = f * 1000 / resize_frames )) || true
+    eased=$(pg_ease "$progress" ease-in-out)
+
+    (( w = old_w + (new_w - old_w) * eased / 1000 )) || true
+    (( h = old_h + (new_h - old_h) * eased / 1000 )) || true
+    if (( w < 3 )); then w=3; fi
+    if (( h < 1 )); then h=1; fi
+
+    (( x = (win_w - w) / 2 )) || true
+    (( y = (win_h - h) / 2 )) || true
+
+    (( cx = x + w / 2 )) || true
+    (( cy = y + h / 2 )) || true
+
+    if (( cx < expect_cx - 1 || cx > expect_cx + 1 )); then
+        center_ok=0
+        printf "  \033[31mFAIL\033[0m  resize-center-eio-x: frame %d cx=%d, expected %d\n" \
+            "$f" "$cx" "$expect_cx"
+    fi
+    if (( cy < expect_cy - 1 || cy > expect_cy + 1 )); then
+        center_ok=0
+        printf "  \033[31mFAIL\033[0m  resize-center-eio-y: frame %d cy=%d, expected %d\n" \
+            "$f" "$cy" "$expect_cy"
+    fi
+done
+(( total++ ))
+if (( center_ok )); then
+    (( pass++ ))
+    (( verbose )) && printf "  \033[32mpass\033[0m  resize-center: all frames centered (ease-in-out)\n"
+else
+    (( fail++ ))
+fi
+
+section "Resize interpolation: size endpoints"
+
+# first frame (f=1): size should be slightly past old size
+(( progress = 1 * 1000 / resize_frames )) || true
+eased=$(pg_ease "$progress" ease-in-out)
+(( w = old_w + (new_w - old_w) * eased / 1000 )) || true
+(( h = old_h + (new_h - old_h) * eased / 1000 )) || true
+(( total++ )) || true
+if (( w >= old_w && w <= new_w )); then
+    (( pass++ )) || true
+    (( verbose )) && printf "  \033[32mpass\033[0m  resize-first-w: %d in [%d, %d]\n" "$w" "$old_w" "$new_w"
+else
+    (( fail++ )) || true
+    printf "  \033[31mFAIL\033[0m  resize-first-w: %d not in [%d, %d]\n" "$w" "$old_w" "$new_w"
+fi
+
+# last frame (f=frames): size should equal new size exactly
+(( progress = resize_frames * 1000 / resize_frames )) || true
+eased=$(pg_ease "$progress" ease-in-out)
+(( w = old_w + (new_w - old_w) * eased / 1000 )) || true
+(( h = old_h + (new_h - old_h) * eased / 1000 )) || true
+assert_eq "resize-end-w" "$new_w" "$w"
+assert_eq "resize-end-h" "$new_h" "$h"
+
+section "Resize interpolation: monotonic size growth"
+
+# when expanding, width and height should never decrease
+prev_w=0
+prev_h=0
+mono_ok=1
+for (( f = 1; f <= resize_frames; f++ )); do
+    (( progress = f * 1000 / resize_frames )) || true
+    eased=$(pg_ease "$progress" ease-in-out)
+
+    (( w = old_w + (new_w - old_w) * eased / 1000 )) || true
+    (( h = old_h + (new_h - old_h) * eased / 1000 )) || true
+
+    if (( w < prev_w )); then
+        mono_ok=0
+        printf "  \033[31mFAIL\033[0m  resize-mono-w: frame %d w=%d < prev %d\n" \
+            "$f" "$w" "$prev_w"
+    fi
+    if (( h < prev_h )); then
+        mono_ok=0
+        printf "  \033[31mFAIL\033[0m  resize-mono-h: frame %d h=%d < prev %d\n" \
+            "$f" "$h" "$prev_h"
+    fi
+    prev_w=$w
+    prev_h=$h
+done
+(( total++ ))
+if (( mono_ok )); then
+    (( pass++ ))
+    (( verbose )) && printf "  \033[32mpass\033[0m  resize-monotonic: size never decreases when expanding\n"
+else
+    (( fail++ ))
+fi
+
 # ── summary ────────────────────────────────────────────────────
 
 printf "\n\033[1m%d tests: %d passed, %d failed\033[0m\n" "$total" "$pass" "$fail"

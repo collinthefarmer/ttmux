@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 #
-# agent-popup — open a popup session with key restriction
+# agent-popup — open a popup session with key restriction and size toggle
 #
 # Ensures the session exists, applies popup key restrictions,
 # opens the session in a popup, and restores key state on close.
+# Binds prefix+M inside the popup to toggle between normal and
+# expanded size with an animated transition.
 #
 # Reads from tmux session options set by the calling program:
 #   @<prefix>SessionName     — the session name
@@ -24,6 +26,8 @@ opt_prefix="$3"
 shift 3
 
 popup_keys="$dir/scripts/popup-keys"
+popup_open="$dir/scripts/popup-open"
+popup_resize="$dir/scripts/popup-resize"
 
 session=$(tmux show-option -qv "@${opt_prefix}SessionName")
 attach_cmd=$(tmux show-option -qv "@command${opt_prefix^}Session")
@@ -42,11 +46,94 @@ if ! tmux has-session -t "$session" 2>/dev/null; then
     fi
 fi
 
-# restrict keybinds, open popup with animation, restore on close
-popup_open="$dir/scripts/popup-open"
+# ── parse geometry from popup args ─────────────────────────────
+normal_w="50%" normal_h="50%"
+expanded_w="95%" expanded_h="90%"
+filtered_args=()
+
+args=("$@")
+i=0
+while (( i < ${#args[@]} )); do
+    case "${args[i]}" in
+        -w) normal_w="${args[i+1]}"; i=$((i+2)) ;;
+        -h) normal_h="${args[i+1]}"; i=$((i+2)) ;;
+        *)  filtered_args+=("${args[i]}"); i=$((i+1)) ;;
+    esac
+done
+
+# ── resolve expanded size ──────────────────────────────────────
+# The normal size may be absolute (e.g. -w 80) and can exceed the
+# expanded percentage on small terminals. Resolve both against the
+# window and ensure expanded is always at least as large as normal.
+# shellcheck source=popup-geometry
+source "$dir/scripts/popup-geometry"
+# window dimensions match the display context for the triggering client;
+# popup-resize uses -x C -y C for centering (tmux handles status bar offset)
+_win_w=$(tmux display-message -p '#{window_width}')
+_win_h=$(tmux display-message -p '#{window_height}')
+_nw=$(pg_resolve_pct "$normal_w" "$_win_w")
+_nh=$(pg_resolve_pct "$normal_h" "$_win_h")
+_ew=$(pg_resolve_pct "$expanded_w" "$_win_w")
+_eh=$(pg_resolve_pct "$expanded_h" "$_win_h")
+if (( _ew < _nw )); then _ew=$_nw; fi
+if (( _eh < _nh )); then _eh=$_nh; fi
+# use resolved absolute values so popup-resize doesn't re-resolve
+# against a potentially different window context
+normal_w=$_nw normal_h=$_nh
+expanded_w=$_ew expanded_h=$_eh
+
+# ── toggle loop ────────────────────────────────────────────────
+# capture fg now, while the pane context is still valid — after
+# the popup closes via detach, display-message may resolve against
+# a different pane and return the wrong color
+fg=$(tmux display-message -p '#{pane_fg}')
+
+expanded=0
+first_open=1
 anim_args="--origin bottom --scale none --frames 3 --duration 200"
 
-"$popup_keys" open "$table" "$session"
-# shellcheck disable=SC2086
-"$popup_open" $anim_args -- -b rounded "$@" -E "$attach_cmd"
-"$popup_keys" close "$session"
+# clear any stale toggle request
+tmux set-option -su @popupToggleAction 2>/dev/null || true
+
+while true; do
+    if (( expanded )); then
+        cur_w="$expanded_w" cur_h="$expanded_h"
+    else
+        cur_w="$normal_w" cur_h="$normal_h"
+    fi
+
+    # register toggle keybind (prefix+M detaches after flagging a toggle)
+    tmux bind-key -T "${table}-prefix" M \
+        set-option -s @popupToggleAction 1 '\;' detach-client
+
+    # open the popup
+    "$popup_keys" open "$table" "$session"
+    if (( first_open )); then
+        # shellcheck disable=SC2086
+        "$popup_open" $anim_args -- -b rounded \
+            -w "$cur_w" -h "$cur_h" "${filtered_args[@]}" -E "$attach_cmd"
+        first_open=0
+    else
+        # after a resize animation, open directly — no intro animation
+        "$popup_open" --no-animate -- -b rounded \
+            -w "$cur_w" -h "$cur_h" "${filtered_args[@]}" -E "$attach_cmd"
+    fi
+    "$popup_keys" close "$session"
+
+    # check if the popup closed because of a toggle request
+    if [[ "$(tmux show-option -sqv @popupToggleAction 2>/dev/null)" != "1" ]]; then
+        break
+    fi
+    tmux set-option -su @popupToggleAction
+
+    # animate the size transition, then loop to reopen at the new size
+    if (( expanded )); then
+        "$popup_resize" "$expanded_w" "$expanded_h" "$normal_w" "$normal_h" \
+            --fg "$fg" --win "${_win_w}x${_win_h}"
+        expanded=0
+    else
+        "$popup_resize" "$normal_w" "$normal_h" "$expanded_w" "$expanded_h" \
+            --fg "$fg" --win "${_win_w}x${_win_h}"
+        expanded=1
+    fi
+done

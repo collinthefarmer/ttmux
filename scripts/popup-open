@@ -98,6 +98,19 @@ win_h=$(tmux display-message -p '#{window_height}')
 # ── resolve fg color for animation frames ───────────────────────
 fg=$(tmux display-message -p '#{pane_fg}')
 
+# convert tmux color to ANSI 24-bit bg escape — the popup -s style
+# only paints the container behind the pane, not the pane itself
+ansi_bg=""
+if [[ "$fg" == \#* ]]; then
+    hex="${fg#\#}"
+    r=$(( 16#${hex:0:2} )); g=$(( 16#${hex:2:2} )); b=$(( 16#${hex:4:2} ))
+    ansi_bg="\\033[48;2;${r};${g};${b}m"
+elif [[ "$fg" == colour* ]]; then
+    ansi_bg="\\033[48;5;${fg#colour}m"
+elif [[ "$fg" =~ ^[0-9]+$ ]]; then
+    ansi_bg="\\033[48;5;${fg}m"
+fi
+
 # ── generate frame data ────────────────────────────────────────
 # shellcheck source=popup-geometry
 source "$(dirname "$0")/popup-geometry"
@@ -112,7 +125,13 @@ frame_lines="${frame_data%$'\n'*}"
 # ── animate (one popup per frame) ───────────────────────────────
 # The first frame calibrates overhead; remaining frames use the
 # measured value to compute sleep.
-frame_cmd="true"
+# build the fill command — ANSI bg escape + clear fills every cell
+if [[ -n "$ansi_bg" ]]; then
+    fill_prefix="printf '${ansi_bg}'; clear"
+else
+    fill_prefix="clear"  # fallback: relies on -s style
+fi
+frame_cmd="$fill_prefix"
 first=1
 
 while IFS=' ' read -r x y w h; do
@@ -121,7 +140,7 @@ while IFS=' ' read -r x y w h; do
         # measure the overhead to compute sleep for the rest
         t0=$EPOCHREALTIME
         tmux display-popup -x "$x" -y "$y" -w "$w" -h "$h" \
-            -b none -s "bg=$fg" -E true 2>/dev/null || true
+            -b none -E "$fill_prefix" 2>/dev/null || true
         t1=$EPOCHREALTIME
         overhead_ms=$(awk "BEGIN{printf \"%d\", ($t1 - $t0) * 1000}")
         target_ms=$(( 1000 / fps ))
@@ -129,13 +148,13 @@ while IFS=' ' read -r x y w h; do
         if (( sleep_ms < 0 )); then sleep_ms=0; fi
         frame_sleep=$(awk "BEGIN{printf \"%.4f\", $sleep_ms / 1000}")
         if [[ "$frame_sleep" != "0" && "$frame_sleep" != "0.0000" ]]; then
-            frame_cmd="sleep $frame_sleep"
+            frame_cmd="$fill_prefix; sleep $frame_sleep"
         fi
         first=0
     else
         first=0
         tmux display-popup -x "$x" -y "$y" -w "$w" -h "$h" \
-            -b none -s "bg=$fg" -E "$frame_cmd" 2>/dev/null || true
+            -b none -E "$frame_cmd" 2>/dev/null || true
     fi
 done <<< "$frame_lines"
 

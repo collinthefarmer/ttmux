@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+#
+# popup-resize — animate a popup size transition
+#
+# Shows colored overlay frames interpolating between two sizes,
+# using the popup-geometry easing library. Bridges a close/reopen
+# cycle so the resize appears smooth rather than jarring.
+#
+# Usage:
+#   popup-resize <old-w> <old-h> <new-w> <new-h> [options]
+#
+# Options:
+#   --frames N      number of animation frames (default: 4)
+#   --duration MS   total animation time in ms (default: 120)
+#   --easing TYPE   easing curve (default: ease-in-out)
+#   --fg COLOR      overlay color (default: pane_fg from tmux)
+#   --win WxH       window dimensions for centering (default: from tmux)
+
+set -euo pipefail
+
+old_w=$1 old_h=$2 new_w=$3 new_h=$4
+shift 4
+
+frames=4
+duration=120
+easing=ease-in-out
+fg=""
+win=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --frames)   frames="$2"; shift 2 ;;
+        --duration) duration="$2"; shift 2 ;;
+        --easing)   easing="$2"; shift 2 ;;
+        --fg)       fg="$2"; shift 2 ;;
+        --win)      win="$2"; shift 2 ;;
+        *)          shift ;;
+    esac
+done
+
+# shellcheck source=popup-geometry
+source "$(dirname "$0")/popup-geometry"
+
+if [[ -n "$win" ]]; then
+    win_w="${win%x*}"
+    win_h="${win#*x}"
+else
+    win_w=$(tmux display-message -p '#{window_width}')
+    win_h=$(tmux display-message -p '#{window_height}')
+fi
+[[ -n "$fg" ]] || fg=$(tmux display-message -p '#{pane_fg}')
+
+# ── convert tmux color to ANSI 24-bit bg escape ──────────────
+# The popup -s style only affects the container behind the pane;
+# to fill the pane itself, we must set the terminal bg via ANSI
+# escapes inside the popup command.
+ansi_bg=""
+if [[ "$fg" == \#* ]]; then
+    # #rrggbb → \033[48;2;R;G;Bm
+    hex="${fg#\#}"
+    r=$(( 16#${hex:0:2} ))
+    g=$(( 16#${hex:2:2} ))
+    b=$(( 16#${hex:4:2} ))
+    ansi_bg="\\033[48;2;${r};${g};${b}m"
+elif [[ "$fg" == colour* ]]; then
+    # colour0-colour255 → \033[48;5;Nm
+    n="${fg#colour}"
+    ansi_bg="\\033[48;5;${n}m"
+elif [[ "$fg" =~ ^[0-9]+$ ]]; then
+    ansi_bg="\\033[48;5;${fg}m"
+fi
+
+# resolve percentages to absolute cells
+old_w=$(pg_resolve_pct "$old_w" "$win_w")
+old_h=$(pg_resolve_pct "$old_h" "$win_h")
+new_w=$(pg_resolve_pct "$new_w" "$win_w")
+new_h=$(pg_resolve_pct "$new_h" "$win_h")
+
+# nothing to animate if sizes match
+if (( old_w == new_w && old_h == new_h )); then
+    exit 0
+fi
+
+# ── generate and display interpolated frames ───────────────────
+# Each frame needs enough time for the terminal to render the fill.
+# Use a fixed per-frame sleep derived from the total duration; the
+# popup open/close overhead (~10-15ms) adds to each frame but
+# keeping frames visible is more important than exact timing.
+frame_ms=$(( duration / frames ))
+if (( frame_ms < 16 )); then frame_ms=16; fi  # minimum ~1 display frame
+frame_sleep=$(awk "BEGIN{printf \"%.4f\", $frame_ms / 1000}")
+
+for (( f = 1; f <= frames; f++ )); do
+    (( progress = f * 1000 / frames )) || true
+    eased=$(pg_ease "$progress" "$easing")
+
+    (( w = old_w + (new_w - old_w) * eased / 1000 )) || true
+    (( h = old_h + (new_h - old_h) * eased / 1000 )) || true
+    if (( w < 3 )); then w=3; fi
+    if (( h < 1 )); then h=1; fi
+
+    # -x C -y C: let tmux center natively — manual centering requires
+    # client_height (not window_height) to account for the status bar,
+    # but #{client_height} can resolve against the wrong client when
+    # multiple clients are connected. tmux's C handles this correctly.
+    if [[ -n "$ansi_bg" ]]; then
+        tmux display-popup -x C -y C -w "$w" -h "$h" \
+            -b none -E "printf '${ansi_bg}'; clear; sleep $frame_sleep" \
+            2>/dev/null || true
+    else
+        tmux display-popup -x C -y C -w "$w" -h "$h" \
+            -b none -s "bg=$fg" -E "clear; sleep $frame_sleep" \
+            2>/dev/null || true
+    fi
+done
